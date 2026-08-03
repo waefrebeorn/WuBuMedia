@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "WuBuDesk Secure Bridge",
+  "version": "0.1.0",
+  "description": "Local-only, token-gated, read-only page-context relay for the WuBuDesk cohost. Binds to 127.0.0.1 only. Does NOT read passwords/cookies.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "WuBuDesk Bridge (connected = badge on)",
+    "default_popup": "popup.html"
+  },
+  "externally_connectable": {
+    "matches": ["*://127.0.0.1/*"]
+  },
+  "minimum_chrome_version": "110"
+}
