@@ -179,6 +179,36 @@ static int do_key(const wchar_t *text) {
     return 0;
 }
 
+/* ---- virtual-key presses (Enter/Esc/Tab/F-keys/arrows/Alt combos) ---- */
+static void send_vk(WORD vk, int up) {
+    INPUT in = {0};
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = vk;
+    in.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
+    SendInput(1, &in, sizeof(INPUT));
+}
+
+static int do_press(const wchar_t *name) {
+    struct { const wchar_t *n; WORD vk; } map[] = {
+        { L"enter", VK_RETURN }, { L"return", VK_RETURN }, { L"esc", VK_ESCAPE },
+        { L"tab", VK_TAB }, { L"space", VK_SPACE }, { L"backspace", VK_BACK },
+        { L"delete", VK_DELETE }, { L"up", VK_UP }, { L"down", VK_DOWN },
+        { L"left", VK_LEFT }, { L"right", VK_RIGHT }, { L"home", VK_HOME },
+        { L"end", VK_END }, { L"f5", VK_F5 }, { L"f10", VK_F10 },
+        { L"f4", VK_F4 }, { L"alt", VK_MENU }, { L"a", 'A' }, { L"n", 'N' },
+    };
+    int i;
+    WORD vk = 0;
+    for (i = 0; i < (int)(sizeof(map)/sizeof(map[0])); ++i)
+        if (!_wcsicmp(name, map[i].n)) { vk = map[i].vk; break; }
+    if (!vk) { fprintf(stderr, "unknown key '%ls'\n", name); return 1; }
+    /* support "alt+f4" style via 'alt' then 'f4' handled by caller; here simple press */
+    send_vk(vk, 0);
+    send_vk(vk, 1);
+    printf("pressed %ls\n", name);
+    return 0;
+}
+
 /* ---- graceful close ---- */
 static int do_close(const wchar_t *sub) {
     HWND w = find_window(sub);
@@ -205,6 +235,7 @@ int wmain(int argc, wchar_t **argv) {
     if (!wcscmp(argv[1], L"close"))  return argc > 2 ? do_close(argv[2]) : 1;
     if (!wcscmp(argv[1], L"click"))  return argc > 3 ? do_click(_wtoi(argv[2]), _wtoi(argv[3])) : 1;
     if (!wcscmp(argv[1], L"key"))    return argc > 2 ? do_key(argv[2]) : 1;
+    if (!wcscmp(argv[1], L"press"))  return argc > 2 ? do_press(argv[2]) : 1;
     wprintf(L"unknown cmd\n");
     return 1;
 }

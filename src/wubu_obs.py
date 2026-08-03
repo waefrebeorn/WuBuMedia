@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: WaefreBeorn-UMV3
 #!/usr/bin/env python3
 """
 wubu_obs.py — WuBuDesk OBS cohost controller ("face + hands" on the stream).
@@ -110,7 +109,8 @@ class ObsCohost:
         if auth:
             if not self.password:
                 raise ObsError("server requires auth; password missing")
-            payload["authentication"] = self._make_auth(auth["salt"],
+            payload["authentication"] = self._make_auth(self.password,
+                                                        auth["salt"],
                                                         auth["challenge"])
         self._send(1, payload)  # Identify
         ident = json.loads(self._ws.recv())
@@ -121,13 +121,15 @@ class ObsCohost:
         return True
 
     @staticmethod
-    def _make_auth(salt, challenge):
-        secret = hashlib.sha256((salt).encode()).digest()
-        secret = hashlib.sha256(secret + challenge.encode()).digest()
-        auth = base64.b64encode(secret).decode()
-        # obs-websocket v5 expects: base64(sha256(secret + challenge) + salt)
-        h = hashlib.sha256(secret + challenge.encode()).digest()
-        return base64.b64encode(h + salt.encode()).decode()
+    def _make_auth(password, salt, challenge):
+        # obs-websocket v5 authentication (per official spec):
+        #   secret = base64(sha256(password + salt))
+        #   auth   = base64(sha256(secret + challenge))
+        secret = base64.b64encode(
+            hashlib.sha256((password + salt).encode()).digest()).decode()
+        auth = base64.b64encode(
+            hashlib.sha256((secret + challenge).encode()).digest()).decode()
+        return auth
 
     def close(self):
         if self._ws:
@@ -224,7 +226,17 @@ class ObsCohost:
 
 def main():
     import os
-    pw = os.environ.get("OBS_WS_PASSWORD", "6UyOuaE1hGFXnKUr")
+    pw = os.environ.get("OBS_WS_PASSWORD")
+    if not pw:
+        # read the LIVE password from OBS's websocket config (it regenerates on migration)
+        import json as _json
+        try:
+            _cfg = _json.load(open(os.path.join(
+                os.environ.get("APPDATA", r"C:\Users\eman5\AppData\Roaming"),
+                "obs-studio", "plugin_config", "obs-websocket", "config.json")))
+            pw = _cfg.get("server_password")
+        except Exception:
+            pw = None
     obs = ObsCohost(port=4455, password=pw)
     try:
         obs.connect()
