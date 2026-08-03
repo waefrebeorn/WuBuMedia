@@ -1,0 +1,22 @@
+WaefreBeorn Umbrella License v3.0
+
+This repository (WuBuMedia) is licensed under the WaefreBeorn Umbrella License v3.0.
+See the canonical LICENSE file and FAQ at:
+  https://github.com/waefrebeorn/waefrebeorn-umbrella-license
+
+SPDX-License-Identifier: WaefreBeorn-UMV3
+
+This license applies to all work published under the WaefreBeorn name, including
+all forks, derived works, and modifications.
+
+Summary (read the canonical LICENSE for the binding text):
+- Source-available, NOT OSI/FSF-approved.
+- Source is visible and redistributable for non-commercial / personal / research /
+  educational use, provided attribution is retained.
+- Commercial use REQUIRES explicit written permission from waefrebeorn@waefrebeorn.org.
+- Attested-mutation clause applies to modified forks that run under WuBuFW; where no
+  firmware attestation is available, mutations are appended to the WuBuOS recursive
+  optimizer audit log (dgm_archive.json) for reproducibility.
+- Liability is disclaimed.
+
+For questions about licensing or commercial use: waefrebeorn@waefrebeorn.org

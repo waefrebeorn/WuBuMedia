@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="refresh" content="2" />
+<title>WuBuDesk — Cohost Face</title>
+<!-- SPDX-License-Identifier: WaefreBeorn-UMV3 -->
+<style>
+  :root{
+    --bg: rgba(8,10,20,0.0);
+    --neon:#39ff14; --neon2:#00e5ff; --warn:#ffd166; --sad:#7aa2ff; --angry:#ff5d5d;
+  }
+  html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;
+    font-family:"Segoe UI",system-ui,sans-serif;}
+  #stage{position:fixed;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:flex-end;padding-bottom:6vh;}
+  /* the avatar: a stylized "desk cube" with eyes that react to mood */
+  #avatar{width:160px;height:160px;position:relative;filter:drop-shadow(0 0 18px var(--neon));}
+  .cube{position:absolute;inset:0;border:3px solid var(--neon);border-radius:22px;
+    background:linear-gradient(145deg,rgba(20,40,30,.85),rgba(10,20,30,.85));
+    transform:rotate(0deg);transition:transform .4s ease;}
+  .eye{position:absolute;top:54px;width:30px;height:30px;border-radius:50%;
+    background:var(--neon2);box-shadow:0 0 14px var(--neon2);transition:all .3s ease;}
+  #eL{left:34px;} #eR{right:34px;}
+  .mouth{position:absolute;bottom:40px;left:50%;transform:translateX(-50%);
+    width:70px;height:14px;border-bottom:4px solid var(--neon);border-radius:0 0 40px 40px;
+    transition:all .3s ease;}
+  #name{margin-top:14px;color:var(--neon);font-weight:800;letter-spacing:2px;
+    text-shadow:0 0 10px var(--neon);font-size:20px;}
+  #ticker{margin-top:8px;max-width:70vw;color:#bfe;Bfont-size:15px;text-align:center;
+    text-shadow:0 0 8px #0f08;min-height:20px;}
+  #mood{position:fixed;top:12px;right:16px;color:#8fa;font-size:12px;
+    font-family:monospace;opacity:.7;}
+  /* mood states */
+  body[data-mood="happy"]  .cube{transform:rotate(-4deg) scale(1.04);}
+  body[data-mood="happy"]  .eye{background:var(--neon);box-shadow:0 0 18px var(--neon);}
+  body[data-mood="happy"]  .mouth{width:80px;height:22px;border-radius:0 0 50px 50px;}
+  body[data-mood="sad"]    .eye{background:var(--sad);box-shadow:0 0 12px var(--sad);top:60px;}
+  body[data-mood="sad"]    .mouth{width:50px;height:8px;border-radius:40px 40px 0 0;border-bottom:none;border-top:4px solid var(--sad);bottom:34px;}
+  body[data-mood="angry"]  .eye{background:var(--angry);box-shadow:0 0 16px var(--angry);}
+  body[data-mood="angry"]  .mouth{width:46px;height:10px;border-bottom:4px solid var(--angry);}
+  body[data-mood="thinking"] .cube{animation:pulse 1.6s infinite ease-in-out;}
+  @keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.06);}}
+</style>
+</head>
+<body data-mood="neutral">
+  <div id="mood">WuBuDesk · UMV3</div>
+  <div id="stage">
+    <div id="avatar">
+      <div class="cube"></div>
+      <div class="eye" id="eL"></div>
+      <div class="eye" id="eR"></div>
+      <div class="mouth"></div>
+    </div>
+    <div id="name">WuBuDesk</div>
+    <div id="ticker">online · representing the real AGI stack</div>
+  </div>
+<script>
+  // Poll the local state file wubu_obs.py writes (face_state.json).
+  // The OBS browser source serves this page from a local file:// or http server.
+  async function tick(){
+    try{
+      const r = await fetch('face_state.json?cb='+Date.now());
+      if(!r.ok) return;
+      const s = await r.json();
+      const mood = s.mood || 'neutral';
+      document.body.setAttribute('data-mood', mood);
+      if(s.text) document.getElementById('ticker').textContent = s.text;
+    }catch(e){ /* file not ready yet — keep last state */ }
+  }
+  tick(); setInterval(tick, 1500);
+</script>
+</body>
+</html>

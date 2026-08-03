@@ -1,0 +1,14 @@
+# secrets / tokens
+*.token
+.env
+.env.*
+*_SECRET*
+credentials*
+id_ed25519*
+# agent proofs / local state
+guard_last.json
+face_state.json
+# build artifacts
+*.o
+*.exe
+__pycache__/
