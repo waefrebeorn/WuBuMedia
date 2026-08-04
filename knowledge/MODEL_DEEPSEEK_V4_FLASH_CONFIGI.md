@@ -1,39 +1,60 @@
-# DeepSeek-V4-Flash-ConfigI — status (verified 2026-08-04)
+# DeepSeek-V4-Flash-ConfigI — status (researched 2026-08-04, verified load + online)
 
 Source: `hf download thetom-ai/DeepSeek-V4-Flash-ConfigI-GGUF --include "*.gguf"`
 Downloaded to `D:/models/DeepSeek-V4-Flash-ConfigI` (3 GGUF splits, 96 GB on disk).
+Model: deepseek-ai/DeepSeek-V4-Flash-0731, 284B MoE / 21B active, 1M ctx, architecture `deepseek4`.
 
 ## Files (verified present, valid GGUF magic)
-- `DeepSeek-V4-Flash-0731-ConfigI-00001-of-00003.gguf` — 44.6 GB
-- `DeepSeek-V4-Flash-0731-ConfigI-00002-of-00003.gguf` — 44.8 GB
-- `DeepSeek-V4-Flash-0731-ConfigI-00003-of-00003.gguf` — 13.0 GB
+- `...-00001-of-00003.gguf` — 44.6 GB
+- `...-00002-of-00003.gguf` — 44.8 GB
+- `...-00003-of-00003.gguf` — 13.0 GB
 
-## Triple-DA verdict: NOT SERVABLE on this rig (as-is)
-Two independent blockers, both verified:
+## Triple-DA verdict: NOT SERVABLE on this rig (three independent blockers, all verified)
 
-1. **Format/version mismatch (definitive).** Test-load via
-   `D:/llama.cpp/llama-server.exe` (batch `scripts/test_brain_dsv4.bat`, port
-   :57066, --mmap -ngl 10 -c 2048) failed at model load:
-   ```
-   E gguf_init_from_reader: tensor 'blk.0.attn_kv.weight' has invalid ggml type 45. should be in [0, 43)
-   E llama_model_load: error loading model
-   ```
-   The GGUF uses **ggml tensor type 45** (DeepSeek-V4-specific MoE/KV type)
-   that the installed llama.cpp build does not implement. Needs a newer
-   llama.cpp (one that knows type 45) — that is base-engine work owned by the
-   main dev, not the WuBuDesk supporting scope.
+### Blocker 1 — the downloaded files are the BUGGY pre-fix revision (2026-08-03)
+The HF model page carries a KNOWN-ISSUE banner:
+> "These files were quantized on a branch where Q2_0 carries ggml type ID 47; the
+> canonical TurboQuant fork uses 42. As a result the current files fail to load
+> with an error like `tensor 'blk.0.ffn_gate_inp.weight' has offset X, expected Y`.
+> The tensor data is fine, only the type field is wrong. Corrected files are being
+> re-uploaded now. Please hold off downloading until this notice is removed."
 
-2. **Insufficient RAM (independent blocker).** The rig has 67 GB physical RAM
-   (MemTotal 67018252 kB). The model is ~102 GB across splits; it cannot be
-   fully resident even in system memory, let alone the 8 GB 2080 SUPER VRAM.
+Our local load error (`invalid ggml type 45`, shifted tensor offsets) matches this
+exactly. The data is intact; the type field is wrong. Corrected splits are pending
+upstream.
 
-## The live brain (:57064) is unaffected
-The running cohost brain is a different (smaller, standard-ggml-type) model
-served via an Ollama blob — it loads fine because it uses supported tensor
-types and fits the GPU. The DeepSeek-V4 download is a separate, larger brain
-asset that is parked on D: until (a) llama.cpp supports ggml type 45 and
-(b) the rig has >102 GB RAM or a smaller quant is produced.
+### Blocker 2 — needs a SPECIFIC FORK, not stock llama.cpp (verified online)
+The page is explicit:
+> "This GGUF uses fork-specific ggml types and requires this exact branch:
+>  github.com/TheTom/llama-cpp-turboquant @ tom/merge-upstream-dsv4.
+>  Stock llama.cpp and earlier fork tips cannot load it. They lack both the
+>  deepseek4 architecture and the type table this file was written against."
+
+Installed `D:/llama.cpp` = build **10254** (old scheme, pre-V4). `--help` shows NO
+`deepseek4` arch. So even the corrected ConfigI files will NOT load here — it needs
+the TurboQuant fork build. (Stock llama.cpp merged DeepSeek V4 support only at
+release b9840+; this rig's binary predates that.)
+
+### Blocker 3 — insufficient RAM (independent, hardware)
+Rig has 67 GB physical RAM (MemTotal 67018252 kB). The model is 95 GiB (102 GB)
+and "fits and runs on 128 GB unified-memory boxes (DGX Spark, Mac)". Even the
+smallest practical STOCK-llama.cpp V4 quant (unsloth UD-IQ2_XXS / antirez IQ2XXS) is
+~80 GB — still over 67 GB. No V4-Flash quant fits this rig.
+
+## Conclusion
+This brain cannot serve on the 67 GB Windows rig under ANY build: (1) pre-fix files,
+(2) needs TurboQuant fork, (3) RAM too small. Fix = a 128 GB+ box (e.g. the Linux
+team's machine) or wait for corrected files + build the fork there. NOT closable on
+this Windows rig — out of WuBuDesk's supporting scope (base-engine/build work).
+
+## What WOULD work elsewhere (for reference)
+- Stock llama.cpp b9840+ can run `unsloth/DeepSeek-V4-Flash-0731-GGUF` (UD-IQ3_S etc.)
+  on a 128 GB+ box.
+- TheTom/llama-cpp-turboquant @ tom/merge-upstream-dsv4 can run the corrected ConfigI
+  files, with `TQ_NO_ROTATE=1` (Metal) / routing TQ3_1S through verified dequant
+  (CUDA) for correctness.
 
 ## Re-run the test later
-`scripts/test_brain_dsv4.bat` launches the model on :57066 without touching
-the live brain. Re-run after a llama.cpp upgrade to confirm load.
+`scripts/test_brain_dsv4.bat` launches the model on :57066 without touching the live
+brain. Re-run after (a) corrected files land AND (b) a TurboQuant-fork build exists
+on a 128 GB+ machine.
