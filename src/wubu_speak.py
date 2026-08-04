@@ -17,6 +17,14 @@ but we also expose a simple amplitude envelope here for fallback.
 """
 import sys, os, json, argparse, subprocess, time
 
+# Ensure the cohost deps are importable regardless of ambient PYTHONPATH.
+# .venv_win is a venv clone that resolves to the Hermes agent Python, so
+# kokoro/sounddevice/etc. live in that site-packages.
+_HERMES_SITE = (r"C:\Users\eman5\AppData\Local\hermes\hermes-agent"
+                r"\venv\Lib\site-packages")
+if _HERMES_SITE not in sys.path:
+    sys.path.insert(0, _HERMES_SITE)
+
 # Ensure HOME/USERPROFILE exist for Kokoro/torch (they call expanduser()).
 # MSYS/bash shells may not export these; set a safe fallback before any import
 # that triggers expanduser (kokoro, torch, huggingface_hub cache paths).

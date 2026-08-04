@@ -16,6 +16,19 @@ import sys
 import time
 import threading
 
+# Ensure the cohost deps are importable regardless of ambient PYTHONPATH.
+# .venv_win is a venv clone that resolves to the Hermes agent Python, so
+# sounddevice/silero/whisper live in that site-packages.
+_HERMES_SITE = (r"C:\Users\eman5\AppData\Local\hermes\hermes-agent"
+                r"\venv\Lib\site-packages")
+if _HERMES_SITE not in sys.path:
+    sys.path.insert(0, _HERMES_SITE)
+
+# Ensure HOME/USERPROFILE exist for faster-whisper/torch (they call expanduser()).
+_HOME = os.environ.get("USERPROFILE") or os.environ.get("HOME") or "C:/Users/eman5"
+os.environ.setdefault("HOME", _HOME)
+os.environ.setdefault("USERPROFILE", _HOME)
+
 VENV = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".venv_win",
                                     "Scripts", "python.exe"))
 

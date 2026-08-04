@@ -63,6 +63,14 @@ def obs_connect(face_url="http://127.0.0.1:8137/index.html"):
     global _OBS
     if _OBS is not None:
         return _OBS
+    # .venv_win is a venv clone that resolves to the Hermes agent Python, so the
+    # cohost deps (websocket/sounddevice/etc.) live in that site-packages. Ensure
+    # it is importable regardless of the ambient PYTHONPATH (the launcher sets it,
+    # but this keeps the loop robust if invoked directly).
+    _HERMES_SITE = (r"C:\Users\eman5\AppData\Local\hermes\hermes-agent"
+                    r"\venv\Lib\site-packages")
+    if _HERMES_SITE not in sys.path:
+        sys.path.insert(0, _HERMES_SITE)
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import wubu_obs
