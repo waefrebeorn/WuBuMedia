@@ -1,0 +1,9 @@
+kokoro
+soundfile
+numpy
+typing_extensions
+faster-whisper
+ffsubsync
+silero-vad
+torch
+onnxruntime

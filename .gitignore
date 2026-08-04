@@ -12,3 +12,4 @@ face_state.json
 *.o
 *.exe
 __pycache__/
+face/cohost_line.wav

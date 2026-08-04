@@ -52,32 +52,36 @@ def record(text):
 
 def speak(text, mood="happy", interruptible=True):
     """Push the cohost's line to voice + overlay (Step 2). Best-effort.
-    If interruptible and the boss starts talking (barge-in) mid-speech, abort."""
-    import threading
+    Shells out to the venv python so Kokoro+numpy are always present, regardless
+    of which python runs the loop. If interruptible, a VAD watcher aborts speech
+    mid-stream (don't cut the boss off)."""
+    import threading, subprocess, tempfile, pathlib
     stop = threading.Event()
     if interruptible:
-        # start a VAD watcher that sets stop if boss speech detected
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             from wubu_listen import BargeIn
-            bi = BargeIn(stop)
-            bi.start()
+            BargeIn(stop).start()
         except Exception:
             pass
+    # write a stop-flag file the speak process can honor (best-effort barge-in)
+    flag = os.path.join(tempfile.gettempdir(), "wubu_stop.flag")
+    if os.path.exists(flag):
+        os.remove(flag)
     try:
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-        from wubu_speak import main as speak_main
-        import io, contextlib
-        argv = ["wubu_speak.py", text, "--mood", mood,
-                "--stop-event", "1" if interruptible else "0"]
-        # wubu_speak reads a global stop via env to allow mid-stream abort
-        old = sys.argv
-        sys.argv = argv
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                speak_main()
-        finally:
-            sys.argv = old
+        venv_py = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               ".venv_win", "Scripts", "python.exe")
+        if not os.path.exists(venv_py):
+            venv_py = "python3"
+        src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wubu_speak.py")
+        # run; if stop fires, kill the speech process (barge-in)
+        proc = subprocess.Popen([venv_py, src, text, "--mood", mood])
+        while proc.poll() is None:
+            if stop.is_set():
+                proc.terminate()
+                break
+            time.sleep(0.05)
+        proc.wait()
     except Exception as e:
         try:
             fp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -87,6 +91,7 @@ def speak(text, mood="happy", interruptible=True):
         except Exception:
             pass
         print("speak-fallback:", e)
+
     finally:
         stop.set()
 
