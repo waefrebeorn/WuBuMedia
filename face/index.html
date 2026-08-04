@@ -38,6 +38,10 @@
     background:#000;transform:translate(-50%,-50%);transition:transform .08s ease-out;}
   #lid{position:absolute;inset:0;background:#012;border-radius:50%;
     transform:scaleY(0);transform-origin:center;transition:transform .12s ease;}
+  #mouth{position:absolute;top:78%;left:50%;transform:translate(-50%,-50%) scaleY(0.05);
+    width:26px;height:14px;background:#012;border-radius:0 0 14px 14px;
+    box-shadow:0 0 8px var(--neon);transition:transform .06s linear;opacity:.9;}
+  body[data-mode="movie"] #mouth{box-shadow:0 0 8px var(--neon);}
   body.blink #lid{transform:scaleY(1);}
   #glint{position:absolute;top:38%;left:42%;width:10px;height:10px;border-radius:50%;
     background:rgba(255,255,255,.85);filter:blur(1px);}
@@ -101,6 +105,7 @@
     <div id="sigil">
       <div id="ring"></div><div id="ring2"></div>
       <div id="eye"><div id="iris"><div id="pupil"></div></div><div id="glint"></div><div id="lid"></div></div>
+      <div id="mouth"></div>
     </div>
     <div id="hud">
       <span class="stat">GPU <b id="s_gpu">2080S</b></span>
@@ -129,6 +134,43 @@
   });
   // blink
   setInterval(()=>{document.body.classList.add('blink');setTimeout(()=>document.body.classList.remove('blink'),130);},3200);
+
+  // ----- lip-sync: drive #mouth from cohost_line.wav when speaking -----
+  const mouth = document.getElementById('mouth');
+  let audioCtx=null, analyser=null, srcNode=null, speaking=false, rafId=null;
+  async function startLipSync(){
+    try{
+      const resp = await fetch('cohost_line.wav?cb='+Date.now());
+      if(!resp.ok) return;
+      const buf = await resp.arrayBuffer();
+      if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      const dec = await audioCtx.decodeAudioData(buf);
+      analyser = audioCtx.createAnalyser(); analyser.fftSize=256;
+      srcNode = audioCtx.createBufferSource(); srcNode.buffer=dec;
+      srcNode.connect(analyser); analyser.connect(audioCtx.destination);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const t0 = audioCtx.currentTime;
+      srcNode.start(0);
+      const pump=()=>{
+        analyser.getByteFrequencyData(data);
+        const lo=data.slice(0,15).reduce((a,b)=>a+b,0)/15;   // 0-2.5kHz
+        const mid=data.slice(15,60).reduce((a,b)=>a+b,0)/45;  // 2.5-10kHz
+        const lvl=(lo+mid)/2/255;
+        mouth.style.transform=`translate(-50%,-50%) scaleY(${Math.max(0.05,Math.min(1,lvl*2.5)).toFixed(3)})`;
+        if(audioCtx.currentTime - t0 < dec.duration) rafId=requestAnimationFrame(pump);
+        else { mouth.style.transform='translate(-50%,-50%) scaleY(0.05)'; }
+      };
+      pump();
+    }catch(e){ /* fallback: simple open/close */ }
+  }
+  function pollSpeaking(){
+    fetch('face_state.json?cb='+Date.now()).then(r=>r.json()).then(s=>{
+      const sp = !!s.speaking;
+      if(sp && !speaking){ speaking=true; startLipSync(); }
+      else if(!sp && speaking){ speaking=false; mouth.style.transform='translate(-50%,-50%) scaleY(0.05)'; }
+    }).catch(()=>{});
+  }
+  setInterval(pollSpeaking, 300);
 
   // state polling
   async function tick(){

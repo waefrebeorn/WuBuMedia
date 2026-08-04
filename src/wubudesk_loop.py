@@ -50,12 +50,40 @@ def record(text):
     return text
 
 
-def loop(interval, max_iter):
+def speak(text, mood="happy"):
+    """Push the cohost's line to voice + overlay (Step 2). Best-effort."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from wubu_speak import main as speak_main
+        import io, contextlib
+        argv = ["wubu_speak.py", text, "--mood", mood]
+        old = sys.argv
+        sys.argv = argv
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                speak_main()
+        finally:
+            sys.argv = old
+    except Exception as e:
+        # fallback: just animate the overlay ticker
+        try:
+            fp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "face", "face_state.json")
+            st = json.load(open(fp)) if os.path.exists(fp) else {}
+            st["text"] = text; json.dump(st, open(fp, "w"), indent=2)
+        except Exception:
+            pass
+        print("speak-fallback:", e)
+
+
+def loop(interval, max_iter, do_speak=False):
     for i in range(max_iter or 1):
         png, b64 = perceive()
         out = think(b64)
         record(out)
         print(f"[loop {i+1}] {out}")
+        if do_speak:
+            speak(out)
         if (max_iter or 1) > 1 and i + 1 < (max_iter or 1):
             time.sleep(interval)
 
@@ -65,8 +93,9 @@ if __name__ == "__main__":
     ap.add_argument("--once", action="store_true", help="single perceive->think")
     ap.add_argument("--loop", type=int, default=0, help="loop seconds (0=once)")
     ap.add_argument("--max", type=int, default=1, help="max iterations")
+    ap.add_argument("--speak", action="store_true", help="also voice the line")
     a = ap.parse_args()
     if a.once or a.loop == 0:
-        loop(0, 1)
+        loop(0, 1, a.speak)
     else:
-        loop(a.loop, a.max)
+        loop(a.loop, a.max, a.speak)
