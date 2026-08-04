@@ -58,7 +58,7 @@ static void init_world(void) {
     b3ShapeDef sd = b3DefaultShapeDef();
     sd.baseMaterial.friction = 0.42f;
     b3Sphere groundSphere;
-    groundSphere.center.x = 0.0f; groundSphere.center.y = 0.0f; groundSphere.center.z = -10.0f;
+    groundSphere.center.x = 0.0f; groundSphere.center.y = -10.0f; groundSphere.center.z = 0.0f;
     groundSphere.radius = 10.0f;
     b3CreateSphereShape(ground, &sd, &groundSphere);
     g_world_inited = 1;
