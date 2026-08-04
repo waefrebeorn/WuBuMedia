@@ -51,6 +51,35 @@ def record(text):
 
 
 # ---------------------------------------------------------------------------
+# Resource guard (boss directive 2026-08-03): never steal GPU/CPU from the
+# stream or game. Probe the rig and defer heavy/voice work when streaming/gaming.
+# ---------------------------------------------------------------------------
+def guard_state():
+    """Return the resource_guard verdict, or a permissive default if the guard
+    module is unavailable. Always safe to call (never raises)."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import resource_guard
+        return resource_guard.snapshot()
+    except Exception as e:
+        # guard missing -> assume idle/permissive so the cohost still works
+        return {"state": "IDLE", "safe_for_heavy": True,
+                "limits": {"max_cpu_pct": 100, "max_gpu_pct": 100,
+                           "max_parallel_jobs": 8, "can_use_gpu": True},
+                "note": f"guard-unavailable:{e}"}
+
+
+def guard_allows_voice():
+    """Voice (Kokoro) is CPU-bound and can contend with stream encoding.
+    Defer it when boss is streaming or gaming, per the resource directive."""
+    v = guard_state()
+    state = v.get("state")
+    if state in ("STREAMING", "GAMING"):
+        return False, state
+    return True, state
+
+
+# ---------------------------------------------------------------------------
 # OBS "hands/face" layer (best-effort; never crashes the loop if OBS is down)
 # ---------------------------------------------------------------------------
 _OBS = None
@@ -116,7 +145,24 @@ def speak(text, mood="happy", interruptible=True):
     """Push the cohost's line to voice + overlay (Step 2). Best-effort.
     Shells out to the venv python so Kokoro+numpy are always present, regardless
     of which python runs the loop. If interruptible, a VAD watcher aborts speech
-    mid-stream (don't cut the boss off)."""
+    mid-stream (don't cut the boss off).
+
+    Resource guard: Kokoro is CPU-bound and can contend with stream encoding.
+    When boss is streaming/gaming we DEFER voice and only push the text to the
+    overlay (boss directive 2026-08-03: never steal the stream's CPU/GPU)."""
+    allow, state = guard_allows_voice()
+    if not allow:
+        # deferred: still surface the line on the overlay, just no TTS
+        try:
+            fp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "face", "face_state.json")
+            st = json.load(open(fp)) if os.path.exists(fp) else {}
+            st["text"] = text; st["mood"] = mood
+            json.dump(st, open(fp, "w"), indent=2)
+        except Exception:
+            pass
+        print(f"[voice-deferred:{state}] {text[:80]}")
+        return
     import threading, subprocess, tempfile, pathlib
     stop = threading.Event()
     if interruptible:
@@ -178,6 +224,10 @@ def listen_once(timeout=4):
 def loop(interval, max_iter, do_speak=False, conversational=False):
     # bring up OBS control (best-effort) so the face overlay is live on stream
     obs_connect()
+    # resource guard: report the rig state so we honor the streaming/gaming boundary
+    g = guard_state()
+    print(f"[guard] rig state={g.get('state')} safe_for_heavy={g.get('safe_for_heavy')} "
+          f"can_use_gpu={g.get('limits', {}).get('can_use_gpu')}")
     for i in range(max_iter or 1):
         png, b64 = perceive()
         out = think(b64)

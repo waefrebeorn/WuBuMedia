@@ -31,6 +31,31 @@ MODELS = {
 CUDA_VENV = "D:/venv_cuda"
 
 
+def _guard_allows_heavy():
+    """Refuse heavy GPU gen when boss is streaming/gaming (boss directive
+    2026-08-03: never steal the stream's GPU). Returns (ok, reason)."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
+        import resource_guard
+        v = resource_guard.snapshot()
+        if not v.get("safe_for_heavy"):
+            return False, f"rig state={v.get('state')} (heavy gen deferred)"
+        return True, v.get("state")
+    except Exception as e:
+        # guard unavailable -> allow (don't block the harness on a probe failure)
+        return True, f"guard-unavailable:{e}"
+
+
+def _require_heavy_ok(force=False):
+    if force:
+        return True
+    ok, reason = _guard_allows_heavy()
+    if not ok:
+        print(f"[guard] REFUSED: {reason}. Pass --force to override.")
+        return False
+    return True
+
+
 def _cuda_venv_py():
     """Use the CUDA venv python if it exists (built by setup_cuda_venv.py)."""
     p = os.path.join(CUDA_VENV, "Scripts", "python.exe")
@@ -74,8 +99,10 @@ def check(name, patterns, human):
     print(f"[DA] {human}: verified -> {r}")
     return r
 
-def image_to_3d(img_path, out_dir="out/3d"):
+def image_to_3d(img_path, out_dir="out/3d", force=False):
     """TripoSR: single image -> .obj/.glb mesh. Uses local weights in D:/models/TripoSR."""
+    if not _require_heavy_ok(force=force):
+        return "GUARD_REFUSED"
     w = check("triposr", ["model.ckpt", "config.yaml", "run.py"], "TripoSR")
     if not w:
         return "TRIPOSR_WEIGHT_MISSING"
@@ -92,13 +119,15 @@ def image_to_3d(img_path, out_dir="out/3d"):
     objs = glob.glob(os.path.join(out_dir, "*.obj")) + glob.glob(os.path.join(out_dir, "*.glb"))
     return objs[0] if objs else "NO_MESH"
 
-def text_to_image(prompt, out="out/img.png", steps=4):
+def text_to_image(prompt, out="out/img.png", steps=4, force=False):
     """FLUX.2 klein 4B text->image via the correct Flux2KleinPipeline.
 
     model_index.json names Flux2KleinPipeline, so from_pretrained resolves it.
     klein-4B is a 4-step distilled text->image model (not the editing variant).
     On 8GB VRAM we keep only active layers on the GPU via sequential offload.
     """
+    if not _require_heavy_ok(force=force):
+        return "GUARD_REFUSED"
     w = check("flux", ["model_index.json", "flux-2-klein-4b.safetensors"], "FLUX.2 klein 4B")
     if not w:
         return "FLUX_WEIGHT_MISSING"
@@ -121,13 +150,15 @@ print('IMG_SAVED', r'{out}')
     subprocess.run([_cuda_venv_py(), "-c", code], env=_cuda_env())
     return out if os.path.exists(out) else "NO_IMG"
 
-def image_to_video(img_path, prompt="", out="out/vid.mp4", frames=81):
+def image_to_video(img_path, prompt="", out="out/vid.mp4", frames=81, force=False):
     """Wan 2.2 5B image->video via WanImageToVideoPipeline (TI2V).
 
     Wan2.2-5B is a ti2v model (config model_type=ti2v). WanImageToVideoPipeline
     loads all three diffusion shards + VAE + T5. Sequential offload keeps the
     ~20GB of bf16 weights out of the 8GB card (active layers stream through).
     """
+    if not _require_heavy_ok(force=force):
+        return "GUARD_REFUSED"
     w = check("wan", ["diffusion_pytorch_model.safetensors.index.json",
                        "diffusion_pytorch_model-00001-of-00003.safetensors"], "Wan 2.2 5B")
     if not w:
@@ -155,18 +186,18 @@ print('VID_SAVED', r'{out}')
 def main():
     ap = argparse.ArgumentParser(description="WuBuPet generative harness")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    a = sub.add_parser("i3d"); a.add_argument("image"); a.add_argument("--out", default="out/3d")
-    b = sub.add_parser("t2i"); b.add_argument("prompt"); b.add_argument("--out", default="out/img.png"); b.add_argument("--steps", type=int, default=4)
-    c = sub.add_parser("i2v"); c.add_argument("image"); c.add_argument("--prompt", default=""); c.add_argument("--out", default="out/vid.mp4")
+    a = sub.add_parser("i3d"); a.add_argument("image"); a.add_argument("--out", default="out/3d"); a.add_argument("--force", action="store_true")
+    b = sub.add_parser("t2i"); b.add_argument("prompt"); b.add_argument("--out", default="out/img.png"); b.add_argument("--steps", type=int, default=4); b.add_argument("--force", action="store_true")
+    c = sub.add_parser("i2v"); c.add_argument("image"); c.add_argument("--prompt", default=""); c.add_argument("--out", default="out/vid.mp4"); c.add_argument("--force", action="store_true")
     d = sub.add_parser("check"); d.add_argument("model", choices=list(MODELS))
     args = ap.parse_args()
 
     if args.cmd == "i3d":
-        print(image_to_3d(args.image, args.out))
+        print(image_to_3d(args.image, args.out, force=args.force))
     elif args.cmd == "t2i":
-        print(text_to_image(args.prompt, args.out, steps=args.steps))
+        print(text_to_image(args.prompt, args.out, steps=args.steps, force=args.force))
     elif args.cmd == "i2v":
-        print(image_to_video(args.image, args.prompt, args.out))
+        print(image_to_video(args.image, args.prompt, args.out, force=args.force))
     elif args.cmd == "check":
         pats = {"triposr":["*.ckpt","*.pt","*.safetensors","config.yaml"],
                 "flux":["*.safetensors","model_index.json"],
