@@ -59,7 +59,20 @@ video-gen networks (2026, weights to D:, storage unlimited).
 - The cohost spawns props at Poincaré coords on a disk; 2D props stay ON the disk
   plane, 3D props pop OUT of it. This IS the manifold made tangible.
 
-## BUILD PLAN (this session)
+## 6. World-engine build improvements (2026-08-04 research, applied to wubu_world.html v2)
+- **Box3D C API**: `b3World` + `b3BodyDef`/`b3ShapeDef`/`b3Hull`, `friction=0.42`,
+  `b3World_Step(world, dt, substeps)`. Collision routines usable without full sim.
+  Native shim = `src/wubu_world.c` (C11) — compiles Box3D (volume) + Box2D (plane)
+  into a Windows EXE that streams prop state to the overlay. CREED: properly make it.
+- **Paper-Mario flip**: the flip is a CAMERA ORBIT (rotateX 90deg) + a "paper turn"
+  squash (xscale sweep 1->0.02->1). "2D mode" = isometric, "3D mode" = perspective.
+  Implemented as a real CSS camera transition, not a hard cut.
+- **Poincaré viz**: geodesic LINES between spawned props (manifold distance made
+  visible), not just dots. Distance = acosh(1 + 2|u-v|^2 / ((1-|u|^2)(1-|v|^2))).
+  Reference lib: ItsNickBarry/hyperbolic-canvas (we rolled our own on canvas).
+- **OBS browser-source**: keep ZERO external deps (Three.js/Babylon too heavy for a
+  stable overlay). Manual 2.5D perspective on canvas; physics mirrored in JS for the
+  EXE-not-ready case. Native C shim is the "real" engine; HTML is the fallback.
 - A) `face/wubu_world.html` — the world engine (WebGL, browser-source ready):
   wizard body, 2D<->3D flip (Box2D-flat <-> Box3D-volume metaphor), spawn 2D-only/
   3D-only props, Poincaré disk with spawned markers, particle FX, mic/open mouth
