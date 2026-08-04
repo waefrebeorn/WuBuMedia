@@ -2,14 +2,17 @@
 """
 wubu_desktop.py — native Windows desktop control for the cohost (no external deps).
 
-Uses PowerShell (present on the box) for screen capture + UIAutomation click.
-This is the CUA "eyes + hands" on Windows without third-party agents.
+Prefers wubucmd.exe (proper C11 Win32 tool, src/wubucmd.c) for window
+enumeration + input; falls back to PowerShell for screen capture (PNG) and
+UIAutomation clicks. This is the CUA "eyes + hands" on Windows without
+third-party agents.
 
 Capabilities:
   screenshot(path)     -> save PNG of primary screen
   click_dialog(title)  -> find a window by title and click a button by name
   type_text(text)      -> send keystrokes to the foreground window
   list_windows()       -> enumerate visible windows (for the cohost to "see")
+  focus_window(substr) -> restore+foreground a window (native, via wubucmd)
 
 Security: only acts locally; never exfiltrates. Driven by the agent, bounded by
 BOUNDARIES.md (never touches drivers/kernel; respects stream GPU).
@@ -18,6 +21,22 @@ License: SPDX-License-Identifier: WaefreBeorn-UMV3
 import subprocess
 import tempfile
 import os
+
+# Prefer the native C11 wubucmd.exe (faster, no PowerShell/COM spawn).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_WUBUCMD = os.path.join(_HERE, "wubucmd.exe")
+
+
+def _run_wubucmd(args):
+    """Run wubucmd.exe; return (rc, stdout). None if the exe is missing."""
+    if not os.path.exists(_WUBUCMD):
+        return None, ""
+    try:
+        r = subprocess.run([_WUBUCMD] + args, capture_output=True, text=True,
+                           timeout=30)
+        return r.returncode, r.stdout
+    except Exception:
+        return None, ""
 
 PS = "powershell.exe"
 
@@ -46,6 +65,23 @@ Write-Output "SAVED:$path"
 
 
 def list_windows():
+    # prefer the native C11 tool (no PowerShell/COM spawn)
+    rc, out = _run_wubucmd(["list"])
+    if rc == 0 and out.strip():
+        wins = []
+        for line in out.splitlines():
+            # wubucmd prints "  [n] pid=NNNN  Title"
+            s = line.strip()
+            if s.startswith("[") and "]" in s:
+                title = s.split("]", 1)[1].split("pid=", 1)[-1].strip()
+                # strip leading "pid=NNNN  " if present
+                if title.startswith("pid="):
+                    title = title.split(None, 1)[-1] if "  " in title else ""
+                if title:
+                    wins.append(title)
+        if wins:
+            return wins
+    # fallback: PowerShell + EnumWindows
     script = """
 Add-Type @'
 using System; using System.Runtime.InteropServices;
@@ -59,6 +95,35 @@ $out -join "`n"
 """
     r = _ps(script)
     return [w for w in r.stdout.splitlines() if w.strip()]
+
+
+def focus_window(substr):
+    """Restore + foreground a window whose title contains substr (native)."""
+    rc, out = _run_wubucmd(["focus", substr])
+    if rc == 0:
+        return out.strip() or f"focus {substr}"
+    # fallback: PowerShell SetForegroundWindow
+    script = f"""
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class F {{ [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n); }}
+'@
+$sh=Add-Type -Name sh -MemberDefinition '[DllImport("user32.dll")] public static extern IntPtr FindWindow(string c, string t);' -PassThru
+$h=[System.IntPtr]::Zero
+# enumerate by title substring via EnumWindows
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public class E {{ [DllImport("user32.dll")] public static extern bool EnumWindows(Func<IntPtr,int,bool> cb, int p);
+[DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n); }}
+'@
+$found=[System.IntPtr]::Zero
+[E]::EnumWindows({{ param($h,$p) $sb=New-Object System.Text.StringBuilder 256; [E]::GetWindowText($h,$sb,256) | Out-Null; if($sb.ToString().Contains('{substr}')){{ $script:found=$h; return $false }}; return $true }},0) | Out-Null
+if($found -ne [System.IntPtr]::Zero){{ [F]::ShowWindow($found,9); [F]::SetForegroundWindow($found); Write-Output "FOCUSED" }} else {{ Write-Output "NO_WINDOW" }}
+"""
+    r = _ps(script)
+    return r.stdout.strip()
 
 
 def click_dialog(title_substr, button_name="Normal"):
