@@ -33,12 +33,6 @@ import os
 import sys
 import time
 
-try:
-    import websocket
-except ImportError:
-    sys.stderr.write("FATAL: pip install websocket-client\n")
-    raise
-
 
 class ObsError(RuntimeError):
     pass
@@ -100,6 +94,13 @@ class ObsCohost:
 
     # ---- connection + auth ----
     def connect(self):
+        # Lazy import: keeps `import wubu_obs` safe even when the websocket-client
+        # dep isn't on the default path (e.g. when imported by the cohost loop
+        # under a different venv). Only fails if truly missing at connect time.
+        try:
+            import websocket
+        except ImportError:
+            raise ObsError("websocket-client not installed; pip install websocket-client")
         self._ws = websocket.create_connection(self.url, timeout=self.timeout)
         hello = json.loads(self._ws.recv())
         if hello.get("op") != 0:  # Hello

@@ -8,6 +8,7 @@ id_ed25519*
 # agent proofs / local state
 guard_last.json
 face_state.json
+knowledge/rig_state.json
 # build artifacts
 *.o
 *.obj

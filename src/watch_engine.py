@@ -19,12 +19,14 @@ def sh(cmd):
 def main():
     before = sh("git rev-parse HEAD").strip()
     sh("git fetch origin")
-    behind = sh("git rev-list --count HEAD..@{upstream}").strip()
+    branch = sh("git rev-parse --abbrev-ref HEAD").strip()
+    upstream_ref = f"origin/{branch}"  # resolved Python var; avoids @{upstream} + f-string brace bug
+    behind = sh(f"git rev-list --count HEAD..{upstream_ref}").strip()
     if behind == "" or behind == "0":
         print("WATCH: wubuwizard up to date (no new engine commits).")
         return
     # inspect new commits for the signal
-    log = sh(f"git log --oneline HEAD..@{upstream}")
+    log = sh(f"git log --oneline HEAD..{upstream_ref}")
     marker = ("READY_DEEPSEEK_V4" in log) or ("deepseek4" in log.lower())
     touch = ("gguf_reader" in log) or ("deepseek" in log.lower())
     if marker or touch:

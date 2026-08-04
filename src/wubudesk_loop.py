@@ -50,6 +50,60 @@ def record(text):
     return text
 
 
+# ---------------------------------------------------------------------------
+# OBS "hands/face" layer (best-effort; never crashes the loop if OBS is down)
+# ---------------------------------------------------------------------------
+_OBS = None
+
+
+def obs_connect(face_url="http://127.0.0.1:8137/index.html"):
+    """Connect to OBS via obs-websocket and point the WuBuFace source at the
+    live overlay. Returns the ObsCohost or None. Non-destructive: only sets the
+    avatar browser-source URL + pushes state; never switches scenes/mutes."""
+    global _OBS
+    if _OBS is not None:
+        return _OBS
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import wubu_obs
+        # read the live OBS password from its websocket config
+        pw = None
+        try:
+            import json as _json
+            _cfg = _json.load(open(os.path.join(
+                os.environ.get("APPDATA", r"C:\Users\eman5\AppData\Roaming"),
+                "obs-studio", "plugin_config", "obs-websocket", "config.json")))
+            pw = _cfg.get("server_password")
+        except Exception:
+            pw = None
+        obs = wubu_obs.ObsCohost(port=4455, password=pw,
+                                 avatar_source="WuBuFace", face_url=face_url)
+        obs.connect()
+        res = obs.ensure_face(face_url)
+        print(f"[obs] connected; WuBuFace -> {face_url} ({res})")
+        _OBS = obs
+        return obs
+    except Exception as e:
+        print("obs-skip:", e)
+        return None
+
+
+def obs_push(mood="happy", text=None):
+    """Push cohost state into OBS (WuBuFace polls face_state.json) + the overlay."""
+    try:
+        # write the local state file the overlay polls (face/index.html)
+        face_dir = os.environ.get("WUBU_FACE_DIR") or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "face")
+        os.makedirs(face_dir, exist_ok=True)
+        with open(os.path.join(face_dir, "face_state.json"), "w") as f:
+            json.dump({"mood": mood, "text": text, "ts": time.time(),
+                       "speaking": False}, f, indent=2)
+    except Exception:
+        pass
+    # OBS connection is optional; the file above is what the browser source reads
+    return text
+
+
 def speak(text, mood="happy", interruptible=True):
     """Push the cohost's line to voice + overlay (Step 2). Best-effort.
     Shells out to the venv python so Kokoro+numpy are always present, regardless
@@ -114,10 +168,20 @@ def listen_once(timeout=4):
 
 
 def loop(interval, max_iter, do_speak=False, conversational=False):
+    # bring up OBS control (best-effort) so the face overlay is live on stream
+    obs_connect()
     for i in range(max_iter or 1):
         png, b64 = perceive()
         out = think(b64)
         record(out)
+        # mood from rig state: idle/gaming/streaming -> happy; error -> angry
+        mood = "happy"
+        low = (out or "").lower()
+        if "error" in low or "fail" in low:
+            mood = "angry"
+        elif "idle" in low:
+            mood = "thinking"
+        obs_push(mood=mood, text=out)
         print(f"[loop {i+1}] {out}")
         if do_speak:
             speak(out)
