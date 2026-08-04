@@ -2,73 +2,153 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta http-equiv="refresh" content="2" />
-<title>WuBuDesk — Cohost Face</title>
+<title>WuBuDesk — the wizard in your computer</title>
 <!-- SPDX-License-Identifier: WaefreBeorn-UMV3 -->
 <style>
   :root{
-    --bg: rgba(8,10,20,0.0);
     --neon:#39ff14; --neon2:#00e5ff; --warn:#ffd166; --sad:#7aa2ff; --angry:#ff5d5d;
+    --bg: rgba(0,0,0,0);
   }
   html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;
-    font-family:"Segoe UI",system-ui,sans-serif;}
+    font-family:"Segoe UI",system-ui,sans-serif;cursor:none;}
   #stage{position:fixed;inset:0;display:flex;flex-direction:column;
-    align-items:center;justify-content:flex-end;padding-bottom:6vh;}
-  /* the avatar: a stylized "desk cube" with eyes that react to mood */
-  #avatar{width:160px;height:160px;position:relative;filter:drop-shadow(0 0 18px var(--neon));}
-  .cube{position:absolute;inset:0;border:3px solid var(--neon);border-radius:22px;
-    background:linear-gradient(145deg,rgba(20,40,30,.85),rgba(10,20,30,.85));
-    transform:rotate(0deg);transition:transform .4s ease;}
-  .eye{position:absolute;top:54px;width:30px;height:30px;border-radius:50%;
-    background:var(--neon2);box-shadow:0 0 14px var(--neon2);transition:all .3s ease;}
-  #eL{left:34px;} #eR{right:34px;}
-  .mouth{position:absolute;bottom:40px;left:50%;transform:translateX(-50%);
-    width:70px;height:14px;border-bottom:4px solid var(--neon);border-radius:0 0 40px 40px;
-    transition:all .3s ease;}
-  #name{margin-top:14px;color:var(--neon);font-weight:800;letter-spacing:2px;
-    text-shadow:0 0 10px var(--neon);font-size:20px;}
-  #ticker{margin-top:8px;max-width:70vw;color:#bfe;Bfont-size:15px;text-align:center;
-    text-shadow:0 0 8px #0f08;min-height:20px;}
-  #mood{position:fixed;top:12px;right:16px;color:#8fa;font-size:12px;
+    align-items:center;justify-content:flex-end;padding-bottom:5vh;gap:10px;}
+
+  /* ---- the sigil: a rotating rune ring + the all-seeing eye ---- */
+  #sigil{position:relative;width:180px;height:180px;}
+  #ring{position:absolute;inset:0;border-radius:50%;
+    border:2px solid var(--neon);border-top-color:transparent;border-left-color:transparent;
+    box-shadow:0 0 22px var(--neon),inset 0 0 18px rgba(57,255,20,.25);
+    animation:spin 9s linear infinite;}
+  #ring2{position:absolute;inset:18px;border-radius:50%;
+    border:1px dashed var(--neon2);border-bottom-color:transparent;
+    box-shadow:0 0 14px var(--neon2);animation:spin 6s linear infinite reverse;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  /* the eye */
+  #eye{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    width:74px;height:74px;border-radius:50%;
+    background:radial-gradient(circle at 50% 50%,#031 0%,#012 70%);
+    box-shadow:0 0 26px var(--neon),inset 0 0 16px rgba(0,229,255,.4);
+    overflow:hidden;}
+  #iris{position:absolute;top:50%;left:50%;width:34px;height:34px;border-radius:50%;
+    background:radial-gradient(circle at 50% 40%,var(--neon2),var(--neon) 70%,#063 100%);
+    box-shadow:0 0 18px var(--neon);transform:translate(-50%,-50%);
+    transition:transform .08s ease-out;}
+  #pupil{position:absolute;top:50%;left:50%;width:12px;height:12px;border-radius:50%;
+    background:#000;transform:translate(-50%,-50%);transition:transform .08s ease-out;}
+  #lid{position:absolute;inset:0;background:#012;border-radius:50%;
+    transform:scaleY(0);transform-origin:center;transition:transform .12s ease;}
+  body.blink #lid{transform:scaleY(1);}
+  #glint{position:absolute;top:38%;left:42%;width:10px;height:10px;border-radius:50%;
+    background:rgba(255,255,255,.85);filter:blur(1px);}
+
+  /* ---- HUD: rig vitals ---- */
+  #hud{display:flex;gap:14px;color:#9fe;font-family:"Consolas",monospace;font-size:12px;
+    text-shadow:0 0 6px var(--neon);opacity:.82;}
+  .stat{background:rgba(8,16,12,.35);border:1px solid rgba(57,255,20,.3);
+    border-radius:8px;padding:3px 9px;backdrop-filter:blur(2px);}
+  .stat b{color:var(--neon);}
+
+  #name{color:var(--neon);font-weight:800;letter-spacing:3px;font-size:20px;
+    text-shadow:0 0 12px var(--neon);}
+  /* wizard-hat accent — only in movie mode (echoes the Order's iconography) */
+  #hat{position:relative;width:120px;height:64px;margin-bottom:-6px;opacity:0;
+    transition:opacity .4s ease;filter:drop-shadow(0 0 10px var(--neon));}
+  #hatcone{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);
+    width:0;height:0;border-left:34px solid transparent;border-right:34px solid transparent;
+    border-bottom:52px solid var(--neon);}
+  #hatbrim{position:absolute;bottom:0;left:50%;transform:translateX(-50%);
+    width:110px;height:12px;border-radius:6px;background:var(--neon);}
+  #sigilmark{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);
+    color:#012;font-weight:900;font-size:13px;letter-spacing:1px;}
+  body[data-mode="movie"] #hat{opacity:1;}
+  #ticker{max-width:72vw;color:#bfe;font-size:15px;text-align:center;
+    text-shadow:0 0 8px #0f0;min-height:20px;line-height:1.35;}
+  #mode{position:fixed;top:12px;right:16px;color:#8fa;font-size:12px;
     font-family:monospace;opacity:.7;}
-  /* mood states */
-  body[data-mood="happy"]  .cube{transform:rotate(-4deg) scale(1.04);}
-  body[data-mood="happy"]  .eye{background:var(--neon);box-shadow:0 0 18px var(--neon);}
-  body[data-mood="happy"]  .mouth{width:80px;height:22px;border-radius:0 0 50px 50px;}
-  body[data-mood="sad"]    .eye{background:var(--sad);box-shadow:0 0 12px var(--sad);top:60px;}
-  body[data-mood="sad"]    .mouth{width:50px;height:8px;border-radius:40px 40px 0 0;border-bottom:none;border-top:4px solid var(--sad);bottom:34px;}
-  body[data-mood="angry"]  .eye{background:var(--angry);box-shadow:0 0 16px var(--angry);}
-  body[data-mood="angry"]  .mouth{width:46px;height:10px;border-bottom:4px solid var(--angry);}
-  body[data-mood="thinking"] .cube{animation:pulse 1.6s infinite ease-in-out;}
-  @keyframes pulse{0%,100%{transform:scale(1);}50%{transform:scale(1.06);}}
+
+  /* mood palette */
+  body[data-mood="happy"]  #ring,#eye{box-shadow:0 0 26px var(--neon),inset 0 0 16px rgba(57,255,20,.4);}
+  body[data-mood="happy"]  #iris{background:radial-gradient(circle at 50% 40%,#aaffaa,var(--neon) 70%,#063 100%);}
+  body[data-mood="thinking"] #sigil{animation:float 2.2s ease-in-out infinite;}
+  body[data-mood="thinking"] #ring{animation:spin 3s linear infinite;}
+  body[data-mood="sad"]   #eye,#ring{box-shadow:0 0 22px var(--sad),inset 0 0 14px rgba(122,162,255,.4);}
+  body[data-mood="sad"]   #iris{background:radial-gradient(circle at 50% 40%,#cdd9ff,var(--sad) 70%,#023 100%);}
+  body[data-mood="angry"] #eye,#ring{box-shadow:0 0 26px var(--angry),inset 0 0 16px rgba(255,93,93,.4);}
+  body[data-mood="angry"] #iris{background:radial-gradient(circle at 50% 40%,#ffb3b3,var(--angry) 70%,#300 100%);}
+  /* movie-host mode (AGI Made This Movie) — director's chair: amber primary */
+  body[data-mode="movie"]{--neon:#ffd166;--neon2:#ff9e3d;}
+  body[data-mode="movie"] #name::after{content:" · director's chair";color:var(--warn);font-size:13px;letter-spacing:1px;}
+  body[data-mode="movie"] #ring{border-color:var(--neon);box-shadow:0 0 26px var(--neon),inset 0 0 18px rgba(255,209,102,.3);}
+  body[data-mode="movie"] #ring2{border-color:var(--neon2);box-shadow:0 0 14px var(--neon2);}
+  body[data-mode="movie"] #eye{box-shadow:0 0 26px var(--neon),inset 0 0 16px rgba(255,158,61,.4);}
+  body[data-mode="movie"] #iris{background:radial-gradient(circle at 50% 40%,#fff0c0,var(--neon) 70%,#5a3 100%);}
+  body[data-mode="movie"] #mode{color:var(--warn);}
+  body[data-mode="movie"] .p{background:var(--neon);box-shadow:0 0 8px var(--neon);}
+  @keyframes float{0%,100%{transform:translateY(0);}50%{transform:translateY(-10px);}}
+
+  /* ambient particle dots */
+  .p{position:fixed;width:3px;height:3px;border-radius:50%;background:var(--neon);
+    box-shadow:0 0 8px var(--neon);opacity:.5;animation:drift linear infinite;}
+  @keyframes drift{from{transform:translateY(100vh);}to{transform:translateY(-10vh);}}
 </style>
 </head>
-<body data-mood="neutral">
-  <div id="mood">WuBuDesk · UMV3</div>
+<body data-mood="neutral" data-mode="live">
+  <div id="mode">WuBuDesk · UMV3 · LIVE</div>
   <div id="stage">
-    <div id="avatar">
-      <div class="cube"></div>
-      <div class="eye" id="eL"></div>
-      <div class="eye" id="eR"></div>
-      <div class="mouth"></div>
+    <!-- wizard-hat accent (movie mode): echoes the Order's pointed-hat iconography -->
+    <div id="hat"><div id="hatbrim"></div><div id="hatcone"></div><div id="sigilmark">W·B</div></div>
+    <div id="sigil">
+      <div id="ring"></div><div id="ring2"></div>
+      <div id="eye"><div id="iris"><div id="pupil"></div></div><div id="glint"></div><div id="lid"></div></div>
+    </div>
+    <div id="hud">
+      <span class="stat">GPU <b id="s_gpu">2080S</b></span>
+      <span class="stat">CPU <b id="s_cpu">R5-3600</b></span>
+      <span class="stat">BRAIN <b id="s_brain">7.6B</b></span>
+      <span class="stat">ETHOS <b id="s_ethos">stream</b></span>
     </div>
     <div id="name">WuBuDesk</div>
-    <div id="ticker">online · representing the real AGI stack</div>
+    <div id="ticker">online · the wizard in your computer · representing the real AGI stack</div>
   </div>
 <script>
-  // Poll the local state file wubu_obs.py writes (face_state.json).
-  // The OBS browser source serves this page from a local file:// or http server.
+  // ambient particles
+  for(let i=0;i<14;i++){const d=document.createElement('div');d.className='p';
+    d.style.left=(Math.random()*100)+'vw';d.style.animationDuration=(8+Math.random()*10)+'s';
+    d.style.animationDelay=(-Math.random()*12)+'s';document.body.appendChild(d);}
+
+  // eye follows cursor (the all-seeing eye)
+  const iris=document.getElementById('iris'),pupil=document.getElementById('pupil');
+  addEventListener('mousemove',e=>{
+    const r=document.getElementById('eye').getBoundingClientRect();
+    const cx=r.left+r.width/2, cy=r.top+r.height/2;
+    const dx=e.clientX-cx, dy=e.clientY-cy, d=Math.hypot(dx,dy)||1;
+    const m=Math.min(d,22);
+    iris.style.transform=`translate(calc(-50% + ${dx/d*m}px),calc(-50% + ${dy/d*m}px))`;
+    pupil.style.transform=`translate(calc(-50% + ${dx/d*m*1.4}px),calc(-50% + ${dy/d*m*1.4}px))`;
+  });
+  // blink
+  setInterval(()=>{document.body.classList.add('blink');setTimeout(()=>document.body.classList.remove('blink'),130);},3200);
+
+  // state polling
   async function tick(){
     try{
-      const r = await fetch('face_state.json?cb='+Date.now());
-      if(!r.ok) return;
-      const s = await r.json();
-      const mood = s.mood || 'neutral';
-      document.body.setAttribute('data-mood', mood);
-      if(s.text) document.getElementById('ticker').textContent = s.text;
-    }catch(e){ /* file not ready yet — keep last state */ }
+      const r=await fetch('face_state.json?cb='+Date.now());
+      if(!r.ok)return;
+      const s=await r.json();
+      if(s.mood)document.body.setAttribute('data-mood',s.mood);
+      if(s.mode)document.body.setAttribute('data-mode',s.mode);
+      if(s.text)document.getElementById('ticker').textContent=s.text;
+    }catch(e){}
+    // rig vitals (optional)
+    try{
+      const rr=await fetch('rig_state.json?cb='+Date.now());
+      if(rr.ok){const g=await rr.json();
+        if(g.brain)document.getElementById('s_brain').textContent=g.brain;
+        if(g.ethos)document.getElementById('s_ethos').textContent=g.ethos;}
+    }catch(e){}
   }
-  tick(); setInterval(tick, 1500);
+  tick();setInterval(tick,1500);
 </script>
 </body>
 </html>

@@ -29,6 +29,7 @@ Use:
 import base64
 import hashlib
 import json
+import os
 import sys
 import time
 
@@ -214,10 +215,18 @@ class ObsCohost:
 
     def speak(self, mood="neutral", text=None):
         """Push cohost state into the face overlay via a local state file the
-        browser source polls. Decouples WuBuDesk from OBS render timing."""
+        browser source polls. Decouples WuBuDesk from OBS render timing.
+
+        The overlay (face/index.html) fetches `face_state.json` RELATIVE to its
+        own location, so we write next to it by default. Override with the
+        WUBU_FACE_DIR env var (e.g. if OBS serves the page from elsewhere)."""
+        face_dir = os.environ.get("WUBU_FACE_DIR") or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "face")
+        os.makedirs(face_dir, exist_ok=True)
         state = {"mood": mood, "text": text, "ts": time.time()}
         try:
-            with open("/c/Users/eman5/obs/face_state.json", "w") as f:
+            with open(os.path.join(face_dir, "face_state.json"), "w") as f:
                 json.dump(state, f)
         except OSError:
             pass

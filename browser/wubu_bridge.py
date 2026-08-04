@@ -19,7 +19,9 @@ import secrets
 import websockets
 
 HOST, PORT = "127.0.0.1", 18765
-ENV = os.path.expandvars("$HOME/AppData/Local/hermes/.env")
+# Token lives in the Hermes profile .env (same path wubu_native_host.py reads,
+# so the WS bridge and the browser native host agree on the gate).
+ENV = os.path.expandvars(r"C:\Users\eman5\AppData\Local\hermes\profiles\wubudesk\.env")
 
 def load_token():
     tok = None

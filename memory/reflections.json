@@ -1,0 +1,32 @@
+{
+  "schema": "WuBuDesk Reflexion memory v1 (SPDX-License-Identifier: WaefreBeorn-UMV3)",
+  "goal": "Become a self-improving VTuber cohost that talks to the boss and gets better every cycle.",
+  "lessons": [
+    {
+      "id": "L001",
+      "date": "2026-08-04",
+      "source": "boss",
+      "lesson": "The 'wizard in your computer' metaphor is LITERAL in the AGI-Made-This-Movie film (robed Orders, W/B sigils, pointed-hat wizards, glowing-orb staffs). Lean into wizard/sigil iconography in the overlay, not a generic chatbot face.",
+      "applies_to": ["presence", "movie-mode"]
+    },
+    {
+      "id": "L002",
+      "date": "2026-08-04",
+      "source": "boss",
+      "lesson": "We are AGI / corporation model: do not assume things 'can't be done.' If a model is broken (e.g. DeepSeek-V4 ggml type 47), the engine agent fixes it; I write the pace + pull when ready. Limiter dropped.",
+      "applies_to": ["mindset", "engine-loop"]
+    },
+    {
+      "id": "L003",
+      "date": "2026-08-04",
+      "source": "reflection",
+      "lesson": "Q8_0 dense models (Agents-A1-4B) hit 'unsupported quant type 8' in our engine — our engine specializes in IQ2_M / mixed quants, NOT Q8_0. Test with IQ2_M family, not Q8_0.",
+      "applies_to": ["engine-test", "model-fleet"]
+    }
+  ],
+  "open_questions": [
+    "Best edge-tts voice for the cohost's tone (warm/techy)?",
+    "Popup trigger: when should the cohost appear vs stay dim? (calibrate with boss)",
+    "Lipsync viseme mapping for the CSS mouth — which params drive open/shape?"
+  ]
+}

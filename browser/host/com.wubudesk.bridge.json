@@ -1,7 +1,9 @@
 {
   "name": "com.wubudesk.bridge",
   "description": "WuBuDesk Secure Browser Bridge (localhost-only, token-gated, read-only page context)",
-  "path": "C:\\Users\\eman5\\WuBuMedia\\browser\\host\\wubu_native_host.py",
+  "path": "C:/Users/eman5/WuBuMedia/browser/host/wubu_native_host.py",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://wubudeskbridgeplaceholder/"]
+  "allowed_origins": [
+    "chrome-extension://wubudeskbridgeplaceholder/"
+  ]
 }
