@@ -37,6 +37,18 @@ def _cuda_venv_py():
     return p if os.path.exists(p) else _venv_py()
 
 
+def _cuda_env():
+    """Clean env for CUDA-venv subprocesses.
+
+    The ambient PYTHONPATH (Hermes agent site-packages) shadows this venv's
+    CUDA torch with a CPU torch build. Drop PYTHONPATH so the venv's own
+    torch 2.x+cu124 is the one that loads. Keep the rest of the env.
+    """
+    e = dict(os.environ)
+    e.pop("PYTHONPATH", None)
+    return e
+
+
 def _venv_py():
     p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                      ".venv_win", "Scripts", "python.exe")
@@ -76,7 +88,7 @@ def image_to_3d(img_path, out_dir="out/3d"):
            "--output-dir", out_dir, "--model-save-format", "obj",
            "--mc-resolution", "256"]
     print("[run]", " ".join(cmd))
-    subprocess.run(cmd)
+    subprocess.run(cmd, env=_cuda_env())
     objs = glob.glob(os.path.join(out_dir, "*.obj")) + glob.glob(os.path.join(out_dir, "*.glb"))
     return objs[0] if objs else "NO_MESH"
 
@@ -106,7 +118,7 @@ print('IMG_SAVED', r'{out}')
 """
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     print("[run] FLUX.2 klein-4B text->image (cuda venv)")
-    subprocess.run([_cuda_venv_py(), "-c", code])
+    subprocess.run([_cuda_venv_py(), "-c", code], env=_cuda_env())
     return out if os.path.exists(out) else "NO_IMG"
 
 def image_to_video(img_path, prompt="", out="out/vid.mp4", frames=81):
@@ -137,7 +149,7 @@ print('VID_SAVED', r'{out}')
 """
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     print("[run] Wan 2.2 5B image->video (cuda venv)")
-    subprocess.run([_cuda_venv_py(), "-c", code])
+    subprocess.run([_cuda_venv_py(), "-c", code], env=_cuda_env())
     return out if os.path.exists(out) else "NO_VID"
 
 def main():

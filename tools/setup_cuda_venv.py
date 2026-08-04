@@ -65,11 +65,12 @@ def main():
               "accelerate", "huggingface_hub"])
 
     # 3) Triple-DA verify
+    clean_env = dict(os.environ); clean_env.pop("PYTHONPATH", None)
     out = subprocess.run([vpy, "-c",
         "import torch,diffusers; "
         "print('torch', torch.__version__, 'cuda_available', torch.cuda.is_available()); "
         "print('diffusers', diffusers.__version__)"],
-        capture_output=True, text=True)
+        capture_output=True, text=True, env=clean_env)
     print(out.stdout.strip())
     if out.returncode != 0:
         print("[setup] VERIFY FAILED:", out.stderr.strip())
