@@ -22,11 +22,19 @@
       "source": "reflection",
       "lesson": "Q8_0 dense models (Agents-A1-4B) hit 'unsupported quant type 8' in our engine — our engine specializes in IQ2_M / mixed quants, NOT Q8_0. Test with IQ2_M family, not Q8_0.",
       "applies_to": ["engine-test", "model-fleet"]
+    },
+    {
+      "id": "L004",
+      "date": "2026-08-04",
+      "source": "research+boss",
+      "lesson": "Multimodal swarm ('15 heads, 40 hands, 15 ears'): cohost runs as MANY local models, not one. 2026 best-of-class on our rig: TTS=Kokoro-82M (default) + Chatterbox (character clone); STT=NVIDIA Canary-Qwen 2.5B (#1 Open ASR, we have the NVIDIA GPU) / Parakeet for fast EN; Vision=Qwen3.5-9B multimodal (fits 8GB!); orchestrate all via llama.cpp llama-server router mode (crash-isolated processes). Drop edge-tts + whisper.cpp in favor of these local picks.",
+      "applies_to": ["voice", "ears", "eyes", "orchestration"]
     }
   ],
   "open_questions": [
-    "Best edge-tts voice for the cohost's tone (warm/techy)?",
+    "Chatterbox character-voice clone: need a reference take of the cohost voice first.",
     "Popup trigger: when should the cohost appear vs stay dim? (calibrate with boss)",
-    "Lipsync viseme mapping for the CSS mouth — which params drive open/shape?"
+    "Lipsync viseme mapping for the CSS mouth — which params drive open/shape?",
+    "8GB VRAM budget: time-share vision (Qwen3.5-9B) vs brain (7.6B) or offload one to CPU/RAM?"
   ]
 }
