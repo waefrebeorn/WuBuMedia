@@ -76,14 +76,25 @@ def gen_kokoro(text, voice="af_heart", out_wav="face/cohost_line.wav"):
 
 
 def play(path):
-    """Play a WAV on Windows via the default audio device (no extra deps)."""
-    # Use PowerShell + an internal .NET player to avoid ffplay/mpv dependency.
+    """Play a WAV on Windows via the default audio device (no extra deps).
+
+    Uses SoundPlayer in a guard thread with a hard timeout so a missing/silent
+    audio sink can never block the cohost loop mid-sentence (observed: PlaySync
+    hangs when no interactive playback device is present)."""
+    import threading
     ps = (
         "$player = New-Object System.Media.SoundPlayer('%s');"
         "$player.PlaySync()" % path.replace("/", "\\")
     )
-    subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                    "-Command", ps], capture_output=True)
+    def _run():
+        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                        "-Command", ps], capture_output=True)
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=20)  # never let playback stall the loop
+    if t.is_alive():
+        print("warn: audio playback did not return in 20s (sink issue); continuing",
+              file=sys.stderr)
 
 
 def main():

@@ -91,3 +91,21 @@ World engine = cohost presentation layer (HTML/JS + later Box2D/Box3D native).
 Gen networks run as local tools. The boss owns base AGI math; the Poincaré
 EXPLAINER is presentation, not engine logic. If the engine later exposes real
 embedding coords, we feed them in.
+
+## 7. BEST MODELS FOR THIS RIG (RTX 2080 SUPER 8GB / Ryzen 3600 / 64GB) — 2026-08-04 research
+Triple-DA verified against 2026 roundups (triposr.org, trellis2.app, localaimaster,
+botmonster, thundercompute, spheron, unsloth HF cards):
+- **Image→3D**: **TripoSR** — ~6GB VRAM, plain MIT, sub-second feed-forward, runs
+  anywhere incl. CPU fallback. Best for low-hardware. (TRELLIS.2-4B = better PBR
+  but 24GB+; Hunyuan3D 2.1 = 29GB full. Both overkill/unfit for 8GB.) ✅ CHOSEN.
+- **Text→Image**: **FLUX.2 [klein] 4B GGUF Q4_K_M (~2.6GB, 4 steps, Apache 2.0)**.
+  The 23GB bf16 (`black-forest-labs/FLUX.2-klein-4B`) needs ~13GB VRAM → DOA on
+  8GB (confirmed: 1975s/step thrash). The GGUF Q4_K_M fits 8GB with room and
+  renders in 4 steps. RUN VIA **ComfyUI portable** + city96/ComfyUI-GGUF node
+  (desktop ComfyUI crashes on klein; portable works on 8GB Windows). Weights:
+  `unsloth/FLUX.2-klein-4B-GGUF`. 🔧 SETTING UP.
+- **Image→Video**: **Wan 2.2 5B (TI2V)** — 8GB at FP8, Apache 2.0, best
+  quality/VRAM among open I2V (LTX-Video faster but weaker identity; HunyuanVideo
+  Avatar = 40GB). ✅ CHOSEN (downloading `Wan-AI/Wan2.2-TI2V-5B`).
+- Lesson: on 8GB, pick distilled/GGUF quants + ComfyUI portable; never the full
+  bf16. Storage unlimited, but VRAM is the real constraint.

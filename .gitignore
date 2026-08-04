@@ -10,7 +10,15 @@ guard_last.json
 face_state.json
 # build artifacts
 *.o
+*.obj
 *.exe
+*.log
+build_log.txt
+link_log.txt
+nul
+# MSVC banner / cl temp files leaked by wubu_world_*.bat
+# (native engine is built out-of-tree under D:/engines/box3d/build)
+wubu_world.exe
 __pycache__/
 face/cohost_line.wav
 .venv_win/
