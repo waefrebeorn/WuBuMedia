@@ -50,13 +50,27 @@ def record(text):
     return text
 
 
-def speak(text, mood="happy"):
-    """Push the cohost's line to voice + overlay (Step 2). Best-effort."""
+def speak(text, mood="happy", interruptible=True):
+    """Push the cohost's line to voice + overlay (Step 2). Best-effort.
+    If interruptible and the boss starts talking (barge-in) mid-speech, abort."""
+    import threading
+    stop = threading.Event()
+    if interruptible:
+        # start a VAD watcher that sets stop if boss speech detected
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from wubu_listen import BargeIn
+            bi = BargeIn(stop)
+            bi.start()
+        except Exception:
+            pass
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         from wubu_speak import main as speak_main
         import io, contextlib
-        argv = ["wubu_speak.py", text, "--mood", mood]
+        argv = ["wubu_speak.py", text, "--mood", mood,
+                "--stop-event", "1" if interruptible else "0"]
+        # wubu_speak reads a global stop via env to allow mid-stream abort
         old = sys.argv
         sys.argv = argv
         try:
@@ -65,7 +79,6 @@ def speak(text, mood="happy"):
         finally:
             sys.argv = old
     except Exception as e:
-        # fallback: just animate the overlay ticker
         try:
             fp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              "face", "face_state.json")
@@ -74,9 +87,22 @@ def speak(text, mood="happy"):
         except Exception:
             pass
         print("speak-fallback:", e)
+    finally:
+        stop.set()
 
 
-def loop(interval, max_iter, do_speak=False):
+def listen_once(timeout=4):
+    """Ears: capture one utterance from the boss via STT (Step 2). Best-effort."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from wubu_listen import capture_utterance
+        return capture_utterance(timeout=timeout)
+    except Exception as e:
+        print("listen-fallback:", e)
+        return None
+
+
+def loop(interval, max_iter, do_speak=False, conversational=False):
     for i in range(max_iter or 1):
         png, b64 = perceive()
         out = think(b64)
@@ -84,6 +110,11 @@ def loop(interval, max_iter, do_speak=False):
         print(f"[loop {i+1}] {out}")
         if do_speak:
             speak(out)
+        if conversational:
+            # wait for the boss to say something, then we can respond
+            heard = listen_once()
+            if heard:
+                print(f"[boss] {heard}")
         if (max_iter or 1) > 1 and i + 1 < (max_iter or 1):
             time.sleep(interval)
 
