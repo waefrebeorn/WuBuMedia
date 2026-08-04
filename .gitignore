@@ -13,3 +13,5 @@ face_state.json
 *.exe
 __pycache__/
 face/cohost_line.wav
+.venv_win/
+out/
