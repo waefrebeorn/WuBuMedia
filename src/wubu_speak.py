@@ -17,6 +17,13 @@ but we also expose a simple amplitude envelope here for fallback.
 """
 import sys, os, json, argparse, subprocess, time
 
+# Ensure HOME/USERPROFILE exist for Kokoro/torch (they call expanduser()).
+# MSYS/bash shells may not export these; set a safe fallback before any import
+# that triggers expanduser (kokoro, torch, huggingface_hub cache paths).
+_HOME = os.environ.get("USERPROFILE") or os.environ.get("HOME") or "C:/Users/eman5"
+os.environ.setdefault("HOME", _HOME)
+os.environ.setdefault("USERPROFILE", _HOME)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 WUBUMEDIA = os.path.abspath(os.path.join(HERE, ".."))
 sys.path.insert(0, os.path.join(WUBUMEDIA, "src"))

@@ -75,7 +75,13 @@ def speak(text, mood="happy", interruptible=True):
             venv_py = "python3"
         src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wubu_speak.py")
         # run; if stop fires, kill the speech process (barge-in)
-        proc = subprocess.Popen([venv_py, src, text, "--mood", mood])
+        env = dict(os.environ)
+        # ensure HOME/USERPROFILE so kokoro/torch expanduser works under subprocess
+        # (MSYS shell may have neither set; use a safe fallback, no expanduser)
+        _home = os.environ.get("USERPROFILE") or os.environ.get("HOME") or "C:/Users/eman5"
+        env["HOME"] = _home
+        env["USERPROFILE"] = _home
+        proc = subprocess.Popen([venv_py, src, text, "--mood", mood], env=env)
         while proc.poll() is None:
             if stop.is_set():
                 proc.terminate()
