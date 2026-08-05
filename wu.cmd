@@ -61,6 +61,16 @@ if "%CMD%"=="face" (
     goto :eof
 )
 
+if "%CMD%"=="watch" (
+    "%PYTHON%" "%SRC%\wubu_watch.py" --monitor "%PYTHON%" "%SRC%\wubu_cohost.py" %*
+    goto :eof
+)
+
+if "%CMD%"=="agent" (
+    "%PYTHON%" "%SRC%\wubu_agent.py" %*
+    goto :eof
+)
+
 if "%CMD%"=="status" (
     "%PYTHON%" "%SRC%\wubu_obs.py" status
     goto :eof

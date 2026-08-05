@@ -27,6 +27,7 @@ import json
 import os
 import queue
 import sys
+import threading
 import time
 import urllib.request
 
@@ -42,6 +43,7 @@ import wubu_rlm         # noqa: E402
 import wubu_safety      # noqa: E402
 import wubu_stage       # noqa: E402
 import wubu_vision      # noqa: E402
+import wubu_twitch      # noqa: E402  (Twitch IRC chat integration)
 import wubudesk_loop as L  # noqa: E402  (reuse guard/obs/sanitize -- no duplication)
 
 FACE_DIR = os.environ.get("WUBU_FACE_DIR") or os.path.join(ROOT, "face")
@@ -211,6 +213,10 @@ class Cohost:
         self.obs = None
         self.scene = ""
         self.ears = wubu_ears.Ears(self.on_heard, device=device)
+        # Twitch chat client — feeds chat messages to the persona
+        self.twitch = None
+        self._chat_buffer = []  # recent chat messages for batch processing
+        self._chat_lock = threading.Lock()
 
     # -- interactive buddy: chat grabbed/poked/flung the sigil ------------
     def watch_touch(self):
@@ -246,6 +252,24 @@ class Cohost:
         # Use voice-detected emotion as a mood hint if no explicit mood given
         self.utterances.put((text, emotion or self.ears.detected_emotion))
         push_face(listening=True, heard=text[:120])
+
+    # -- twitch chat callback -----------------------------------------------
+    def on_chat(self, msg):
+        """Receive Twitch chat messages, enqueue for the cohost loop.
+
+        Chat spikes are flagged so the persona can react with chat-aware
+        prompts (emote spam = crowd hype, subs = celebration, etc.).
+        """
+        if msg.get("type") != "PRIVMSG":
+            return
+        text = msg.get("text", "")
+        if len(text.strip()) < 2:
+            return
+        msg["_ts"] = time.time()  # timestamp for spike detection
+        with self._chat_lock:
+            self._chat_buffer.append(msg)
+            if len(self._chat_buffer) > 20:
+                self._chat_buffer = self._chat_buffer[-20:]
 
     # -- eyes -------------------------------------------------------------
     def look(self, max_age=20):
@@ -326,6 +350,16 @@ class Cohost:
             print("[stage] setup failed:", e, flush=True)
         self.ears.start()
         self.reflector.start()
+        # Start Twitch chat if credentials are available
+        try:
+            if os.environ.get("TWITCH_CHANNEL") and os.environ.get("TWITCH_OAUTH"):
+                self.twitch = wubu_twitch.TwitchChat(on_message=self.on_chat)
+                self.twitch.start()
+                print(f"[twitch] connected to #{self.twitch.channel}", flush=True)
+            else:
+                print("[twitch] chat disabled (set TWITCH_OAUTH + TWITCH_CHANNEL)", flush=True)
+        except Exception as e:
+            print(f"[twitch] disabled: {e}", flush=True)
         if self.speak:
             try:
                 import wubu_voice
@@ -407,6 +441,23 @@ class Cohost:
             if self.ears.last_error:
                 print("[ears-err]", self.ears.last_error, flush=True)
                 self.ears.last_error = None
+
+            # Check for chat spikes (5+ messages in last 10s)
+            if self.twitch and self._chat_buffer:
+                with self._chat_lock:
+                    recent = [m for m in self._chat_buffer
+                              if time.time() - m.get("_ts", time.time()) < 10]
+                if len(recent) >= 5:
+                    # Chat spike — react with hype
+                    msgs = self.persona.react_to_chat(
+                        [m["text"] for m in recent], visible=self.look())
+                    if msgs:
+                        line = wubu_safety.clean(
+                            self.brain.think(msgs, max_tokens=60))
+                        if line:
+                            say(line, mood="excited",
+                                speak=self.speak and L.guard_allows_voice()[0])
+                            self._chat_buffer = []  # reset after reacting
 
             if self.narrate_every and time.time() - self.last_narrate > self.narrate_every:
                 self.narrate()
