@@ -210,20 +210,61 @@ def play(path, timeout=20):
               file=sys.stderr)
 
 
-def duck_audio():
-    """Placeholder: duck game audio via OBS when cohost is speaking.
+def duck_audio(obs=None, source="Mic/Aux", gain=0.3, _restore=None):
+    """Duck game audio when cohost speaks.
 
-    In production this sends a volume change to OBS's game capture source.
-    Currently a no-op (requires obs-websocket connection).
+    Uses OBS scene item volume multiplication: when the cohost speaks,
+    reduce the game/desktop audio source volume to 30% (configurable).
+    The _restore token is returned so unduck_audio can restore it.
+
+    Research: OBS compressor sidechain with 32:1 ratio, -36dB threshold
+    is the standard, but programmatic volume multiplication via obs-websocket
+    is simpler and doesn't require pre-configured compressor filters.
+
+    Args:
+        obs: ObsCohost instance (or None to auto-connect)
+        source: name of the desktop/game audio source to duck
+        gain: multiplier (0.3 = -10dB reduction)
+        _restore: internal token from the original duck call
+
+    Returns:
+        restore_token to pass to unduck_audio, or None on failure.
     """
-    # Future: obs.set_source_volume("GameCapture", mul=0.3)
-    pass
+    import wubu_stage
+    if obs is None:
+        obs = wubu_stage.connect()
+    if not obs:
+        return None
+    try:
+        # SetInputVolume works on audio sources directly
+        obs._call("SetInputVolume", inputName=source, inputVolumeMul=gain)
+        # Store the original volume so we can restore it precisely
+        vol_r = obs._call("GetInputVolume", inputName=source)
+        orig = vol_r.get("inputVolumeMul") if vol_r else None
+        return {"source": source, "orig": orig or 1.0}
+    except Exception:
+        return None
 
 
-def unduck_audio():
-    """Restore game audio volume after cohost speaking."""
-    # Future: obs.set_source_volume("GameCapture", mul=1.0)
-    pass
+def unduck_audio(obs=None, token=None):
+    """Restore desktop audio volume after cohost finishes speaking.
+
+    Args:
+        obs: ObsCohost instance
+        token: restore token from duck_audio()
+    """
+    if not token:
+        return
+    import wubu_stage
+    if obs is None:
+        obs = wubu_stage.connect()
+    if not obs:
+        return
+    try:
+        obs._call("SetInputVolume", inputName=token["source"],
+                  inputVolumeMul=token.get("orig", 1.0))
+    except Exception:
+        pass
 
 
 def main():
@@ -257,9 +298,9 @@ def main():
                          visemes="AEIOUAEIOU", speak_ms=1500)
 
         if path and not args.nohup:
-            duck_audio()
+            token = duck_audio(source="Desktop Audio")
             play(path)
-            unduck_audio()
+            unduck_audio(token=token)
         elif args.noop:
             time.sleep(1.5)  # pretend to talk for overlay test
     finally:

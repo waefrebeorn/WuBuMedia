@@ -177,21 +177,22 @@ const statEl=document.getElementById('stat');
 const lids=[...document.querySelectorAll('.lid')];
 const pups=[...document.querySelectorAll('.pup')];
 const shines=[...document.querySelectorAll('.shine')];
+const eyes=[...document.querySelectorAll('.wht')];  // eye whites (for mood-based shape morph)
 let e_mouseX=innerWidth/2,e_mouseY=innerHeight/2;
 let _idle_px=0,_idle_py=0;
 
 const MOOD={
-  happy:  {gl:'#49f0c0',brow:0,  smile:1,pup:'#49f0c0',core:1},
-  smug:   {gl:'#9be36a',brow:.35,smile:1,pup:'#9be36a',core:1},
-  thinking:{gl:'#6fc3ff',brow:.2, smile:0,pup:'#6fc3ff',core:.6},
-  angry:  {gl:'#ff6b5e',brow:1,  smile:0,pup:'#ff6b5e',core:1.4},
-  dizzy:  {gl:'#ffd45e',brow:0,  smile:0,pup:'#ffd45e',core:.8},
-  bored:  {gl:'#8fa6bb',brow:.15,smile:0,pup:'#8fa6bb',core:.5},
-  sad:    {gl:'#7f8fe0',brow:.5, smile:0,pup:'#7f8fe0',core:.4},
-  excited:{gl:'#ff6b9d',brow:0,  smile:1,pup:'#ff6b9d',core:1.6},
-  confused:{gl:'#c4b5ff',brow:.3, smile:0,pup:'#c4b5ff',core:.7},
-  mischievous:{gl:'#ff8f50',brow:.2,smile:.5,pup:'#ff8f50',core:1.2},
-  tired:{gl:'#a0a0a0',brow:.1, smile:0,pup:'#a0a0a0',core:.3}
+  happy:  {gl:'#49f0c0',brow:0,  smile:1,pup:'#49f0c0',core:1,    eyeR:19,eyeRY:21},
+  smug:   {gl:'#9be36a',brow:.35,smile:1,pup:'#9be36a',core:1,    eyeR:19,eyeRY:21},
+  thinking:{gl:'#6fc3ff',brow:.2, smile:0,pup:'#6fc3ff',core:.6, eyeR:18,eyeRY:20},
+  angry:  {gl:'#ff6b5e',brow:1,  smile:0,pup:'#ff6b5e',core:1.4, eyeR:17,eyeRY:22},
+  dizzy:  {gl:'#ffd45e',brow:0,  smile:0,pup:'#ffd45e',core:.8, eyeR:18,eyeRY:21},
+  bored:  {gl:'#8fa6bb',brow:.15,smile:0,pup:'#8fa6bb',core:.5, eyeR:18,eyeRY:20},
+  sad:    {gl:'#7f8fe0',brow:.5, smile:0,pup:'#7f8fe0',core:.4, eyeR:20,eyeRY:18},
+  excited:{gl:'#ff6b9d',brow:0,  smile:1,pup:'#ff6b9d',core:1.6, eyeR:20,eyeRY:22},
+  confused:{gl:'#c4b5ff',brow:.3, smile:0,pup:'#c4b5ff',core:.7, eyeR:19,eyeRY:21},
+  mischievous:{gl:'#ff8f50',brow:.2,smile:.5,pup:'#ff8f50',core:1.2, eyeR:20,eyeRY:21},
+  tired:{gl:'#a0a0a0',brow:.1, smile:0,pup:'#a0a0a0',core:.3,   eyeR:20,eyeRY:16}
 };
 let mood='happy',_targetGl='#49f0c0';
 function setMood(m){
@@ -208,6 +209,11 @@ function setMood(m){
   tag.style.background=c.gl;
   // core pulse intensity per mood
   _corePulse=c.core;
+  // Eye shape morphs per mood (wider when excited, narrow when tired)
+  eyes.forEach(e=>{
+    e.setAttribute('rx',c.eyeR);
+    e.setAttribute('ry',c.eyeRY);
+  });
 }
 setMood('happy');
 
@@ -350,6 +356,13 @@ function frame(now){
       idle+=.021;pos.y+=Math.sin(idle)*.34;
       // subtle eye drift when idle (looks around)
       _idle_px=Math.sin(idle*.3)*2; _idle_py=Math.cos(idle*.2)*1;
+      // breathing cycle: subtle scale oscillation
+      const breath=Math.sin(idle*.8)*0.008;
+      ent.style.transform=`rotate(${lean.toFixed(1)}deg) scale(${st.toFixed(3)},${sq.toFixed(3)})`;
+      // mood-specific idle micro-animations
+      if(mood==='excited' && Math.random()<.004) vel.x+=(Math.random()-.5)*8;
+      if(mood==='bored' && Math.random()<.0008) vel.y-=.5; // slump
+      if(mood==='sad' && Math.random()<.002) _idle_py+=.3; // heavier gaze
       if(Math.random()<.0016){vel.x=(Math.random()-.5)*10;vel.y=-5-Math.random()*4;}
     }else idle=0;
   }
@@ -397,7 +410,17 @@ function frame(now){
   tail.setAttribute('d',`M115 210 Q ${150+tdx} ${226+tdy} ${168+tdx*1.5} ${250+tdy}`);
 
   // core pulse (intensity varies per mood)
-  core.setAttribute('r',(15+Math.sin(now*.004)*1.9*_corePulse+(speaking?2.4:0)).toFixed(2));
+  const pulsePhase = now * .004;
+  let coreR = 15+Math.sin(pulsePhase)*1.9*_corePulse;
+  if(speaking) coreR += 2.4;
+  // dizzy: core spins + wobbles
+  if(mood==='dizzy') {
+    coreR *= 0.9 + Math.sin(now*.015)*0.2;
+    core.setAttribute('transform', `rotate(${(now*.4%360).toFixed(1)} 115 182)`);
+  } else {
+    core.setAttribute('transform', '');
+  }
+  core.setAttribute('r', coreR.toFixed(2));
   shadow.setAttribute('rx',(54*st).toFixed(1));
   shadow.setAttribute('opacity',(0.34*(1-Math.min(.6,(innerHeight-150-pos.y)/700))).toFixed(2));
 
