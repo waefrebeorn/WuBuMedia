@@ -220,11 +220,15 @@ class ObsCohost:
         mode: "live" (stream overlay) or "movie" (recorded avatar).
         The state file lives in the face/ directory so the browser source
         can fetch it over localhost:8137 or via file:// access."""
+        # speak_ms = estimated speech-bubble duration in ms (overlay uses
+        # this to animate lip-sync + hide the bubble). Match wubu_cohost.say().
+        text_len = len(text or "")
+        speak_ms = max(1400, min(9000, text_len * 55))
         state = {
             "mood": mood,
             "text": text,
             "speaking": bool(text),
-            "speak_ms": time.time(),
+            "speak_ms": speak_ms,
             "ts": time.time(),
             "mode": mode,
         }

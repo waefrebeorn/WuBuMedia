@@ -37,7 +37,13 @@ def _obs_pw():
 def cmd_speak(args):
     from wubu_obs import ObsCohost
     obs = ObsCohost(port=4455, password=_obs_pw())
-    obs.connect()
+    # OBS connection is best-effort: the face overlay reads face_state.json
+    # from the HTTP server, so we can still push state even if OBS is closed.
+    try:
+        obs.connect()
+        obs.ensure_face()
+    except Exception as e:
+        print(f"[obs-skipped] {e}", file=sys.stderr)
     st = obs.speak(args.mood, args.text, mode=args.mode)
     print(json.dumps(st, indent=2))
 
