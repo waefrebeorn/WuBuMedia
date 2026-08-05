@@ -44,9 +44,20 @@ def think(b64):
 
 
 def record(text):
+    payload = {"ts": time.time(), "rig_read": text}
+    # primary: knowledge/ (legacy consumers / engine-watch)
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w") as f:
-        json.dump({"ts": time.time(), "rig_read": text}, f, indent=2)
+        json.dump(payload, f, indent=2)
+    # mirror to face/ — the overlay (index.html) fetches rig_state.json there
+    try:
+        face_dir = os.environ.get("WUBU_FACE_DIR") or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "face")
+        os.makedirs(face_dir, exist_ok=True)
+        with open(os.path.join(face_dir, "rig_state.json"), "w") as f:
+            json.dump(payload, f, indent=2)
+    except Exception:
+        pass
     return text
 
 
