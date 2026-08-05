@@ -211,10 +211,23 @@ function setMood(m){
 }
 setMood('happy');
 
-// ---------- physics ----------
+// ---------- physics (spring-based, per Josh Womack) ----------
+// Position uses velocity-Verlet integration with spring-damper for natural
+// overshoot/settling. Mass, stiffness, and damping give organic motion.
 const pos={x:innerWidth*.62,y:innerHeight*.5}, vel={x:0,y:0};
 let grabbed=false,gx=0,gy=0,lastPtr={x:0,y:0,t:0},idle=0,land=0;
 let tailLag={x:pos.x,y:pos.y}, headLag=0;
+
+// Spring parameters: stiffness (higher=snappier), damping (higher=less bounce)
+const SPRING_K=0.12, SPRING_D=0.82, GRAVITY=0.36;
+
+function spring(target, current, velocity, k=SPRING_K, d=SPRING_D) {
+    // Classical spring-damper: F = -k * (x - target) - d * v
+    const force = -k * (current - target);
+    const damp = -d * velocity;
+    const accel = force + damp;
+    return velocity + accel;
+}
 
 svg.addEventListener('pointerdown',e=>{
   grabbed=true;gx=e.clientX-pos.x;gy=e.clientY-pos.y;
@@ -313,12 +326,17 @@ function lipsync(dt){
 }
 
 // ---------- main loop ----------
-const G=.36,F=.986,B=.7;
+const G=GRAVITY,F=.986,B=.7;
 let prev=performance.now();
 function frame(now){
   const dt=Math.min(48,now-prev); prev=now;
   if(!grabbed){
-    vel.y+=G;pos.x+=vel.x;pos.y+=vel.y;vel.x*=F;vel.y*=F;
+    vel.y+=G;
+    // Spring-damper for natural horizontal settle (Josh Womack method)
+    vel.x = spring(0, pos.x, vel.x, 0.08, 0.88);
+    pos.x+=vel.x;pos.y+=vel.y;
+    // light damping
+    vel.x*=F;vel.y*=F;
     const W=innerWidth,H=innerHeight;
     if(pos.x<125){pos.x=125;vel.x=-vel.x*B;}
     if(pos.x>W-125){pos.x=W-125;vel.x=-vel.x*B;}
@@ -395,44 +413,72 @@ function frame(now){
 }
 requestAnimationFrame(frame);
 
-// ---------- state polling ----------
+// ---------- state polling (with WebSocket push) ----------
 let lastTxt='',lastHeard='';
+// WebSocket: server pushes face_state.json changes instead of polling
+const WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') +
+               location.hostname + ':8138/state/';
+let ws = null;
+function initWS() {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => console.log('[overlay] ws connected');
+    ws.onmessage = (ev) => {
+        try { applyState(JSON.parse(ev.data)); } catch(e) {}
+    };
+    ws.onclose = () => { setTimeout(initWS, 2000); };  // reconnect
+    ws.onerror = () => { ws.close(); };
+}
+// Try WebSocket first; fall back to polling if it fails
+let wsReady = false;
+setTimeout(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) wsReady = true;
+}, 1000);
+initWS();
+// Polling fallback (reduced frequency since WS handles real-time)
+setInterval(() => {
+    if (!wsReady) poll();
+}, 1200);
+
+// Extract state processing so both WS and polling share the same logic
+function applyState(s){
+  if(s.mood&&s.mood!==mood)setMood(s.mood);
+  speaking=!!s.speaking;
+  const t=(s.text||'').trim();
+  if(t!==lastTxt){
+    lastTxt=t;
+    if(t){bub.textContent=t;bub.classList.add('on');
+          talkUntil=performance.now()+Math.min(9000,1100+t.length*52);}
+    else bub.classList.remove('on');
+  }
+  if(h!==lastHeard){
+    lastHeard=h;
+    if(h){hrd.textContent='"'h+'"';hrd.classList.add('on');}
+    else hrd.classList.remove('on');
+  }
+  // --- viseme string for precise lip-sync (from speech engine) ---
+  if(s.visemes && s.visemes!==visemes){
+    visemes=s.visemes; viseme_pos=0; viseme_t=0;
+  }
+  // --- cohost vital signs (transparency: let the stream see it think) ---
+  if(s.status && statEl){
+    const st=s.status;
+    statEl.textContent=[
+      st.voice ? `voice:${st.voice}` : '',
+      st.cuda ? `gpu:${st.cuda}` : '',
+      st.lessons!=null ? `lessons:${st.lessons}` : '',
+      st.rps ? `${st.rps}ms` : ''
+    ].filter(Boolean).join('  ');
+    statEl.classList.toggle('on', Boolean(st.voice||st.cuda||st.lessons!=null));
+  }
+}
+
 async function poll(){
   try{
     const r=await fetch('face_state.json?c='+Date.now()); if(!r.ok)return;
-    const s=await r.json();
-    if(s.mood&&s.mood!==mood)setMood(s.mood);
-    speaking=!!s.speaking;
-    const t=(s.text||'').trim();
-    if(t!==lastTxt){
-      lastTxt=t;
-      if(t){bub.textContent=t;bub.classList.add('on');
-            talkUntil=performance.now()+Math.min(9000,1100+t.length*52);}
-      else bub.classList.remove('on');
-    }
-    if(h!==lastHeard){
-      lastHeard=h;
-      if(h){hrd.textContent='“'+h+'”';hrd.classList.add('on');}
-      else hrd.classList.remove('on');
-    }
-    // --- viseme string for precise lip-sync (from speech engine) ---
-    if(s.visemes && s.visemes!==visemes){
-      visemes=s.visemes; viseme_pos=0; viseme_t=0;
-    }
-    // --- cohost vital signs (transparency: let the stream see it think) ---
-    if(s.status && statEl){
-      const st=s.status;
-      statEl.textContent=[
-        st.voice ? `voice:${st.voice}` : '',
-        st.cuda ? `gpu:${st.cuda}` : '',
-        st.lessons!=null ? `lessons:${st.lessons}` : '',
-        st.rps ? `${st.rps}ms` : ''
-      ].filter(Boolean).join('  ');
-      statEl.classList.toggle('on', Boolean(st.voice||st.cuda||st.lessons!=null));
-    }
+    applyState(await r.json());
   }catch(e){}
 }
-poll();setInterval(poll,420);
+poll();setInterval(poll,1200);  // reduced poll rate (WS handles real-time)
 })();
 </script>
 </body>

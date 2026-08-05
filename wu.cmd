@@ -31,6 +31,11 @@ if "%CMD%"=="speak" (
     goto :eof
 )
 
+if "%CMD%"=="say" (
+    "%PYTHON%" "%SRC%\wubu_obs.py" speak --mood "%~1" --text "%~2" --mode live
+    goto :eof
+)
+
 if "%CMD%"=="mood" (
     "%PYTHON%" "%SRC%\wubu_obs.py" speak --mood "%~1" --text "" --mode live
     goto :eof
@@ -43,6 +48,16 @@ if "%CMD%"=="stop" (
 
 if "%CMD%"=="capture" (
     "%PYTHON%" "%SRC%\wubu_capture.py" %*
+    goto :eof
+)
+
+if "%CMD%"=="wss" (
+    "%PYTHON%" "%SRC%\wubu_wss.py" %*
+    goto :eof
+)
+
+if "%CMD%"=="face" (
+    "%PYTHON%" "%SRC%\wubu_face.py" %*
     goto :eof
 )
 

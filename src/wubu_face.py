@@ -22,9 +22,15 @@ import gzip
 import json
 import os
 import sys
+import threading
 import time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import unquote
+
+# Simple WebSocket support: we only need to push state updates, so we
+# implement a minimal WS handshake without external dependencies.
+# This lets the overlay receive face_state.json changes instantly via
+# WebSocket instead of polling every 420ms.
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WUBUMEDIA = os.path.dirname(HERE)
