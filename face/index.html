@@ -2,20 +2,27 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>WuBuDesk — the wizard in your computer</title>
+<title>WuBuDesk — the wizard in your computer (Interactive Buddy)</title>
 <!-- SPDX-License-Identifier: WaefreBeorn-UMV3 -->
+<!-- Interactive Buddy cohost: you can GRAB / FLING / POKE the sigil and it
+     reacts with physics + personality. State is pushed to face_state.json by
+     wubudesk_loop.py; interaction impulses are POSTed to the loop via the
+     browser bridge (WS :18765) so the online brain can quip back.
+     Falls back to localStorage echo if the bridge is absent (OBS-safe). -->
 <style>
   :root{
     --neon:#39ff14; --neon2:#00e5ff; --warn:#ffd166; --sad:#7aa2ff; --angry:#ff5d5d;
     --bg: rgba(0,0,0,0);
   }
   html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;
-    font-family:"Segoe UI",system-ui,sans-serif;cursor:none;}
+    font-family:"Segoe UI",system-ui,sans-serif;cursor:grab;}
+  body.grabbing{cursor:grabbing;}
   #stage{position:fixed;inset:0;display:flex;flex-direction:column;
     align-items:center;justify-content:flex-end;padding-bottom:5vh;gap:10px;}
 
   /* ---- the sigil: a rotating rune ring + the all-seeing eye ---- */
-  #sigil{position:relative;width:180px;height:180px;}
+  #sigil{position:relative;width:180px;height:180px;will-change:transform;
+    touch-action:none;user-select:none;}
   #ring{position:absolute;inset:0;border-radius:50%;
     border:2px solid var(--neon);border-top-color:transparent;border-left-color:transparent;
     box-shadow:0 0 22px var(--neon),inset 0 0 18px rgba(57,255,20,.25);
@@ -24,7 +31,6 @@
     border:1px dashed var(--neon2);border-bottom-color:transparent;
     box-shadow:0 0 14px var(--neon2);animation:spin 6s linear infinite reverse;}
   @keyframes spin{to{transform:rotate(360deg);}}
-  /* the eye */
   #eye{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
     width:74px;height:74px;border-radius:50%;
     background:radial-gradient(circle at 50% 50%,#031 0%,#012 70%);
@@ -41,37 +47,26 @@
   #mouth{position:absolute;top:78%;left:50%;transform:translate(-50%,-50%) scaleY(0.05);
     width:26px;height:14px;background:#012;border-radius:0 0 14px 14px;
     box-shadow:0 0 8px var(--neon);transition:transform .06s linear;opacity:.9;}
-  body[data-mode="movie"] #mouth{box-shadow:0 0 8px var(--neon);}
   body.blink #lid{transform:scaleY(1);}
   #glint{position:absolute;top:38%;left:42%;width:10px;height:10px;border-radius:50%;
     background:rgba(255,255,255,.85);filter:blur(1px);}
 
-  /* ---- HUD: rig vitals ---- */
+  /* squish on poke/fling */
+  #sigil.hit{animation:squish .28s ease;}
+  @keyframes squish{0%{transform:scale(1,1)}30%{transform:scale(1.25,.7)}60%{transform:scale(.85,1.15)}100%{transform:scale(1,1)}}
+
   #hud{display:flex;gap:14px;color:#9fe;font-family:"Consolas",monospace;font-size:12px;
     text-shadow:0 0 6px var(--neon);opacity:.82;}
   .stat{background:rgba(8,16,12,.35);border:1px solid rgba(57,255,20,.3);
     border-radius:8px;padding:3px 9px;backdrop-filter:blur(2px);}
   .stat b{color:var(--neon);}
-
   #name{color:var(--neon);font-weight:800;letter-spacing:3px;font-size:20px;
     text-shadow:0 0 12px var(--neon);}
-  /* wizard-hat accent — only in movie mode (echoes the Order's iconography) */
-  #hat{position:relative;width:120px;height:64px;margin-bottom:-6px;opacity:0;
-    transition:opacity .4s ease;filter:drop-shadow(0 0 10px var(--neon));}
-  #hatcone{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);
-    width:0;height:0;border-left:34px solid transparent;border-right:34px solid transparent;
-    border-bottom:52px solid var(--neon);}
-  #hatbrim{position:absolute;bottom:0;left:50%;transform:translateX(-50%);
-    width:110px;height:12px;border-radius:6px;background:var(--neon);}
-  #sigilmark{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);
-    color:#012;font-weight:900;font-size:13px;letter-spacing:1px;}
-  body[data-mode="movie"] #hat{opacity:1;}
   #ticker{max-width:72vw;color:#bfe;font-size:15px;text-align:center;
     text-shadow:0 0 8px #0f0;min-height:20px;line-height:1.35;}
   #mode{position:fixed;top:12px;right:16px;color:#8fa;font-size:12px;
     font-family:monospace;opacity:.7;}
 
-  /* mood palette */
   body[data-mood="happy"]  #ring,#eye{box-shadow:0 0 26px var(--neon),inset 0 0 16px rgba(57,255,20,.4);}
   body[data-mood="happy"]  #iris{background:radial-gradient(circle at 50% 40%,#aaffaa,var(--neon) 70%,#063 100%);}
   body[data-mood="thinking"] #sigil{animation:float 2.2s ease-in-out infinite;}
@@ -80,27 +75,19 @@
   body[data-mood="sad"]   #iris{background:radial-gradient(circle at 50% 40%,#cdd9ff,var(--sad) 70%,#023 100%);}
   body[data-mood="angry"] #eye,#ring{box-shadow:0 0 26px var(--angry),inset 0 0 16px rgba(255,93,93,.4);}
   body[data-mood="angry"] #iris{background:radial-gradient(circle at 50% 40%,#ffb3b3,var(--angry) 70%,#300 100%);}
-  /* movie-host mode (AGI Made This Movie) — director's chair: amber primary */
-  body[data-mode="movie"]{--neon:#ffd166;--neon2:#ff9e3d;}
-  body[data-mode="movie"] #name::after{content:" · director's chair";color:var(--warn);font-size:13px;letter-spacing:1px;}
-  body[data-mode="movie"] #ring{border-color:var(--neon);box-shadow:0 0 26px var(--neon),inset 0 0 18px rgba(255,209,102,.3);}
-  body[data-mode="movie"] #ring2{border-color:var(--neon2);box-shadow:0 0 14px var(--neon2);}
-  body[data-mode="movie"] #eye{box-shadow:0 0 26px var(--neon),inset 0 0 16px rgba(255,158,61,.4);}
-  body[data-mode="movie"] #iris{background:radial-gradient(circle at 50% 40%,#fff0c0,var(--neon) 70%,#5a3 100%);}
-  body[data-mode="movie"] #mode{color:var(--warn);}
-  body[data-mode="movie"] .p{background:var(--neon);box-shadow:0 0 8px var(--neon);}
+  body[data-mood="dizzy"] #sigil{animation:wobble .5s ease-in-out infinite;}
+  @keyframes wobble{0%,100%{transform:rotate(-8deg)}50%{transform:rotate(8deg)}}
   @keyframes float{0%,100%{transform:translateY(0);}50%{transform:translateY(-10px);}}
 
-  /* ambient particle dots */
   .p{position:fixed;width:3px;height:3px;border-radius:50%;background:var(--neon);
     box-shadow:0 0 8px var(--neon);opacity:.5;animation:drift linear infinite;}
   @keyframes drift{from{transform:translateY(100vh);}to{transform:translateY(-10vh);}}
+  #hint{position:fixed;bottom:8px;left:10px;color:#6a8;font-size:11px;opacity:.5;font-family:monospace;}
 </style>
 </head>
 <body data-mood="neutral" data-mode="live">
   <div id="mode">WuBuDesk · UMV3 · LIVE</div>
   <div id="stage">
-    <!-- wizard-hat accent (movie mode): echoes the Order's pointed-hat iconography -->
     <div id="hat"><div id="hatbrim"></div><div id="hatcone"></div><div id="sigilmark">W·B</div></div>
     <div id="sigil">
       <div id="ring"></div><div id="ring2"></div>
@@ -110,21 +97,35 @@
     <div id="hud">
       <span class="stat">GPU <b id="s_gpu">2080S</b></span>
       <span class="stat">CPU <b id="s_cpu">R5-3600</b></span>
-      <span class="stat">BRAIN <b id="s_brain">7.6B</b></span>
+      <span class="stat">BRAIN <b id="s_brain">NVIDIA</b></span>
       <span class="stat">ETHOS <b id="s_ethos">stream</b></span>
     </div>
     <div id="name">WuBuDesk</div>
-    <div id="ticker">online · the wizard in your computer · representing the real AGI stack</div>
+    <div id="ticker">online · grab me, fling me, poke me — I'm your Interactive Buddy</div>
   </div>
+  <div id="hint">drag = grab · flick = throw · tap = poke</div>
 <script>
   // ambient particles
   for(let i=0;i<14;i++){const d=document.createElement('div');d.className='p';
     d.style.left=(Math.random()*100)+'vw';d.style.animationDuration=(8+Math.random()*10)+'s';
     d.style.animationDelay=(-Math.random()*12)+'s';document.body.appendChild(d);}
 
-  // eye follows cursor (the all-seeing eye)
+  const sigil=document.getElementById('sigil');
   const iris=document.getElementById('iris'),pupil=document.getElementById('pupil');
+  const mouth=document.getElementById('mouth');
+  const stage=document.getElementById('stage');
+
+  // ---- physics state ----
+  let pos={x: window.innerWidth/2, y: window.innerHeight*0.55};
+  let vel={x:0,y:0};
+  let grabbed=false, last={x:0,y:0,t:0}, vSamples=[];
+  let idleFloat=0, lastPoke=0;
+
+  function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+
+  // eye follows cursor (unless grabbed -> looks where thrown)
   addEventListener('mousemove',e=>{
+    if(grabbed) return;
     const r=document.getElementById('eye').getBoundingClientRect();
     const cx=r.left+r.width/2, cy=r.top+r.height/2;
     const dx=e.clientX-cx, dy=e.clientY-cy, d=Math.hypot(dx,dy)||1;
@@ -132,57 +133,115 @@
     iris.style.transform=`translate(calc(-50% + ${dx/d*m}px),calc(-50% + ${dy/d*m}px))`;
     pupil.style.transform=`translate(calc(-50% + ${dx/d*m*1.4}px),calc(-50% + ${dy/d*m*1.4}px))`;
   });
-  // blink
   setInterval(()=>{document.body.classList.add('blink');setTimeout(()=>document.body.classList.remove('blink'),130);},3200);
 
-  // ----- lip-sync: drive #mouth from cohost_line.wav when speaking -----
-  const mouth = document.getElementById('mouth');
-  let audioCtx=null, analyser=null, srcNode=null, speaking=false, rafId=null;
-  async function startLipSync(){
-    try{
-      const resp = await fetch('cohost_line.wav?cb='+Date.now());
-      if(!resp.ok) return;
-      const buf = await resp.arrayBuffer();
-      if(!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)();
-      const dec = await audioCtx.decodeAudioData(buf);
-      analyser = audioCtx.createAnalyser(); analyser.fftSize=256;
-      srcNode = audioCtx.createBufferSource(); srcNode.buffer=dec;
-      srcNode.connect(analyser); analyser.connect(audioCtx.destination);
-      const data = new Uint8Array(analyser.frequencyBinCount);
-      const t0 = audioCtx.currentTime;
-      srcNode.start(0);
-      const pump=()=>{
-        analyser.getByteFrequencyData(data);
-        const lo=data.slice(0,15).reduce((a,b)=>a+b,0)/15;   // 0-2.5kHz
-        const mid=data.slice(15,60).reduce((a,b)=>a+b,0)/45;  // 2.5-10kHz
-        const lvl=(lo+mid)/2/255;
-        mouth.style.transform=`translate(-50%,-50%) scaleY(${Math.max(0.05,Math.min(1,lvl*2.5)).toFixed(3)})`;
-        if(audioCtx.currentTime - t0 < dec.duration) rafId=requestAnimationFrame(pump);
-        else { mouth.style.transform='translate(-50%,-50%) scaleY(0.05)'; }
-      };
-      pump();
-    }catch(e){ /* fallback: simple open/close */ }
+  // ---- interaction ----
+  function toLocal(e){return {x:e.clientX, y:e.clientY};}
+  function onDown(e){
+    grabbed=true; document.body.classList.add('grabbing');
+    const p=toLocal(e); last=p; vSamples=[]; vel={x:0,y:0};
+    sigil.style.animation=''; // stop idle float while held
+    e.preventDefault();
   }
-  function pollSpeaking(){
-    fetch('face_state.json?cb='+Date.now()).then(r=>r.json()).then(s=>{
-      const sp = !!s.speaking;
-      if(sp && !speaking){ speaking=true; startLipSync(); }
-      else if(!sp && speaking){ speaking=false; mouth.style.transform='translate(-50%,-50%) scaleY(0.05)'; }
-    }).catch(()=>{});
+  function onMove(e){
+    if(!grabbed) return;
+    const p=toLocal(e);
+    const now=performance.now();
+    pos.x=p.x; pos.y=p.y;
+    const dt=Math.max(1, now-last.t);
+    vSamples.push({x:(p.x-last.x)/dt, y:(p.y-last.y)/dt});
+    if(vSamples.length>4) vSamples.shift();
+    last=p; last.t=now;
+    e.preventDefault();
   }
-  setInterval(pollSpeaking, 300);
+  function onUp(e){
+    if(!grabbed) return;
+    grabbed=false; document.body.classList.remove('grabbing');
+    // fling velocity = avg recent sample (px/ms)
+    if(vSamples.length){
+      const a=vSamples.reduce((s,v)=>({x:s.x+v.x,y:s.y+v.y}),{x:0,y:0});
+      vel.x=a.x/vSamples.length*16;  // -> px/frame (~60fps)
+      vel.y=a.y/vSamples.length*16;
+    }
+    const speed=Math.hypot(vel.x,vel.y);
+    if(speed>14){ // hard fling
+      setMood('dizzy'); bump('fling', Math.round(speed));
+    } else {
+      setMood('happy');
+    }
+    e.preventDefault();
+  }
+  sigil.addEventListener('pointerdown',onDown);
+  addEventListener('pointermove',onMove);
+  addEventListener('pointerup',onUp);
+  // tap = poke
+  let downT=0;
+  sigil.addEventListener('pointerdown',()=>downT=performance.now());
+  sigil.addEventListener('pointerup',()=>{
+    const dt=performance.now()-downT;
+    if(dt<220 && Math.hypot(vel.x,vel.y)<3){ poke(); }
+  });
 
-  // state polling
+  function poke(){
+    const now=performance.now();
+    if(now-lastPoke<250) return; lastPoke=now;
+    sigil.classList.remove('hit'); void sigil.offsetWidth; sigil.classList.add('hit');
+    setMood('angry');
+    bump('poke', 1);
+    setTimeout(()=>setMood('happy'),700);
+  }
+
+  function setMood(m){ document.body.setAttribute('data-mood', m); }
+
+  // push interaction impulse to the loop (bridge WS :18765, else localStorage)
+  let ws=null;
+  try{ ws=new WebSocket('ws://127.0.0.1:18765'); }catch(e){ ws=null; }
+  function bump(kind, power){
+    const msg={type:'buddy_interaction', kind, power, ts:Date.now()};
+    if(ws && ws.readyState===1){ ws.send(JSON.stringify(msg)); }
+    try{ localStorage.setItem('buddy_interaction', JSON.stringify(msg)); }catch(e){}
+    // also drop a file the loop can read
+    try{
+      fetch('buddy_interaction.json?cb='+Date.now(),{method:'POST',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify(msg)}).catch(()=>{});
+    }catch(e){}
+  }
+
+  // ---- physics loop (Interactive Buddy: gravity + wall bounce) ----
+  const GRAV=0.35, FRICT=0.985, BOUNCE=0.72;
+  function step(){
+    if(!grabbed){
+      vel.y += GRAV;
+      pos.x += vel.x; pos.y += vel.y;
+      vel.x *= FRICT; vel.y *= FRICT;
+      const W=window.innerWidth, H=window.innerHeight;
+      if(pos.x<90){pos.x=90; vel.x=-vel.x*BOUNCE;} if(pos.x>W-90){pos.x=W-90; vel.x=-vel.x*BOUNCE;}
+      if(pos.y<90){pos.y=90; vel.y=-vel.y*BOUNCE;} if(pos.y>H-90){pos.y=H-90; vel.y=-vel.y*BOUNCE; if(Math.abs(vel.y)<1)vel.y=0;}
+      // if basically settled and not moving, gentle idle float
+      if(Math.abs(vel.x)<0.2 && Math.abs(vel.y)<0.2){
+        idleFloat += 0.02; pos.y += Math.sin(idleFloat)*0.3;
+      } else { idleFloat=0; }
+    }
+    sigil.style.left=(pos.x-90)+'px';
+    sigil.style.top=(pos.y-90)+'px';
+    sigil.style.position='absolute';
+    requestAnimationFrame(step);
+  }
+  // init position
+  sigil.style.position='absolute';
+  sigil.style.left=(pos.x-90)+'px'; sigil.style.top=(pos.y-90)+'px';
+  step();
+
+  // ---- state polling from loop ----
   async function tick(){
     try{
       const r=await fetch('face_state.json?cb='+Date.now());
       if(!r.ok)return;
       const s=await r.json();
-      if(s.mood)document.body.setAttribute('data-mood',s.mood);
-      if(s.mode)document.body.setAttribute('data-mode',s.mode);
-      if(s.text)document.getElementById('ticker').textContent=s.text;
+      if(s.mood && !grabbed) document.body.setAttribute('data-mood',s.mood);
+      if(s.mode) document.body.setAttribute('data-mode',s.mode);
+      if(s.text) document.getElementById('ticker').textContent=s.text;
     }catch(e){}
-    // rig vitals (optional)
     try{
       const rr=await fetch('rig_state.json?cb='+Date.now());
       if(rr.ok){const g=await rr.json();

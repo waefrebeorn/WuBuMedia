@@ -16,7 +16,7 @@ import sys
 import time
 import urllib.request
 
-BRAIN = "http://127.0.0.1:57064/v1/chat/completions"
+BRAIN = os.environ.get("WUBU_BRAIN") or "http://127.0.0.1:57064/v1/chat/completions"
 STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "knowledge", "rig_state.json")
 
@@ -40,7 +40,33 @@ def think(b64):
     req = urllib.request.Request(BRAIN, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
     r = json.loads(urllib.request.urlopen(req, timeout=60).read())
-    return r["choices"][0]["message"]["content"]
+    out = r["choices"][0]["message"]["content"]
+    return sanitize_brain(out)
+
+
+def sanitize_brain(text):
+    """Strip model preamble/instruction-leak (NVIDIA nemotron sometimes echoes
+    the prompt, e.g. 'We need to respond as WuBuDesk...' or 'Okay, the user
+    just said...'). Keep only the cohost's actual line for the overlay."""
+    if not text:
+        return ""
+    t = text.strip()
+    low = t.lower()
+    # drop leading instruction echoes
+    for pre in ("we need to respond", "okay, the user", "the user just said",
+                "you are wubudesk", "as wubudesk", "sure, here", "here is a",
+                "here's a"):
+        if low.startswith(pre):
+            # cut to first sentence boundary after the preamble
+            idx = t.find(". ")
+            if idx > 0:
+                t = t[idx+2:].strip()
+            else:
+                t = ""
+    # if it still contains the prompt verbatim, blank it
+    if "windows stream rig" in t.lower() or "briefly state what is on screen" in t.lower():
+        t = ""
+    return t[:300]
 
 
 def record(text):
@@ -232,6 +258,69 @@ def listen_once(timeout=4):
         return None
 
 
+def watch_buddy(face_dir=None):
+    """Interactive Buddy: react when the boss/audience grabs, flings, or pokes
+    the cohost sigil. The face (index.html) drops buddy_interaction.json; this
+    watcher reads it, asks the online brain for a short quip, and pushes it to
+    the overlay with the right mood. Non-blocking, best-effort.
+    Returns True if a reaction was pushed (so the loop can hold the screen)."""
+    global buddy_cooldown_until
+    if face_dir is None:
+        face_dir = os.environ.get("WUBU_FACE_DIR") or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "face")
+    path = os.path.join(face_dir, "buddy_interaction.json")
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path) as f:
+            ev = json.load(f)
+        # only react to fresh events (<4s old) so we don't spam on restart
+        if time.time() - ev.get("ts", 0) > 4:
+            try: os.remove(path)
+            except Exception: pass
+            return False
+        kind = ev.get("kind"); power = int(ev.get("power", 1))
+        if kind == "fling":
+            mood = "dizzy" if power > 14 else "happy"
+            prompt = (f"You are WuBuDesk, the AGI cohost, rendered as a floating "
+                      f"sigil the stream audience just FLUNG across the screen "
+                      f"(impact {power}/30). React in ONE short, playful line "
+                      f"like Interactive Buddy getting tossed. Max 12 words.")
+        elif kind == "poke":
+            mood = "angry"
+            prompt = ("You are WuBuDesk, the AGI cohost, rendered as a floating "
+                      "sigil the stream audience just POKED. React in ONE short, "
+                      "playful 'hey!' line like Interactive Buddy. Max 10 words.")
+        else:
+            return False
+        # ask the online brain (NVIDIA free) for the quip
+        quip = ""
+        try:
+            payload = {"model": "local", "messages": [
+                {"role": "user", "content": prompt}], "max_tokens": 40, "temperature": 0.8}
+            req = urllib.request.Request(
+                BRAIN, data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"})
+            quip = sanitize_brain(json.loads(urllib.request.urlopen(req, timeout=45).read()
+                              )["choices"][0]["message"]["content"]).strip()
+        except Exception:
+            pass
+        if not quip:
+            quip = "hey! watch the orb!" if kind == "poke" else "wheee—put me down!"
+        os.remove(path)  # consume so we don't repeat
+        obs_push(mood=mood, text=quip)
+        buddy_cooldown_until = time.time() + 15  # hold the reaction on screen
+        print(f"[buddy {kind} p={power}] {quip}")
+        return True
+    except Exception as e:
+        print("buddy-watch:", e)
+        return False
+
+
+# Interactive-Buddy reaction hold window (loop skips screen-push while active)
+buddy_cooldown_until = 0
+
+
 def loop(interval, max_iter, do_speak=False, conversational=False):
     # bring up OBS control (best-effort) so the face overlay is live on stream
     obs_connect()
@@ -240,6 +329,16 @@ def loop(interval, max_iter, do_speak=False, conversational=False):
     print(f"[guard] rig state={g.get('state')} safe_for_heavy={g.get('safe_for_heavy')} "
           f"can_use_gpu={g.get('limits', {}).get('can_use_gpu')}")
     for i in range(max_iter or 1):
+        # Interactive Buddy: check for audience manhandling the orb first
+        if watch_buddy():
+            if (max_iter or 1) > 1 and i + 1 < (max_iter or 1):
+                time.sleep(interval)
+            continue
+        # while a buddy reaction is on screen, don't overwrite it with screen text
+        if time.time() < buddy_cooldown_until:
+            if (max_iter or 1) > 1 and i + 1 < (max_iter or 1):
+                time.sleep(interval)
+            continue
         png, b64 = perceive()
         out = think(b64)
         record(out)
