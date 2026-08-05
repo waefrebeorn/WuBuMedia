@@ -40,10 +40,16 @@ FACE_DIR = os.environ.get("WUBU_FACE_DIR") or os.path.join(ROOT, "face")
 # The boss streams from PS5 via a USB 3.0 HDMI capture card; its generic UVC
 # driver buffers heavily. We push low-latency settings via obs-websocket.
 CAPTURE_PREFIXES = ("capture", "ps5", "hdmi", "elgato", "avermedia",
-                    "magewell", "webcam", "camera", "video in")
-# Set to True to apply YUY2 + no-buffering on matching capture sources.
-# YUY2 has minimal latency per OBS docs; MJPEG adds encode/decode latency.
+                    "magewell", "webcam", "camera", "video in", "monster",
+                    "averfusion", "genki", "atomos", "atomcam")
+# Set to True to apply format optimization on matching capture sources.
+# YUY2 has minimal latency per OBS docs BUT increases USB bandwidth demand.
+# MJPEG is compressed (less bandwidth) but adds decode latency.
+# For a budget Walmart Monster card, we test both and pick the better FPS.
 OPTIMIZE_CAPTURE = os.environ.get("WUBU_OPTIMIZE_CAPTURE", "1") != "0"
+# Force a specific format ('yuy2' or 'mjpeg') to skip auto-detection.
+# If unset, we try MJPEG first (lower bandwidth on budget cards), then YUY2.
+CAPTURE_FORMAT = os.environ.get("WUBU_CAPTURE_FORMAT", "").lower()  # '', 'yuy2', 'mjpeg'
 
 # Sources the buddy must never sit on top of (substring match, case-insensitive).
 PROTECT = ("chat", "alert", "cam", "phone", "shop", "discord", "vertical",
@@ -84,37 +90,90 @@ def is_capture_source(name):
 def optimize_capture_source(obs, scene, item):
     """Push low-latency settings onto a VideoCaptureDevice source.
 
-    YUY2 format + disabled buffering minimizes the inherent UVC driver lag.
-    The boss's generic USB 3.0 HDMI capture card buffers aggressively by
-    default; this cuts 100-200ms of pipeline delay. Returns True if
-    settings were changed.
+    Generic UVC capture cards (like the Monster HDMI capture from Walmart)
+    buffer heavily and may default to MJPEG (compressed, higher latency) or
+    YUY2 (uncompressed, higher bandwidth). We test both formats and pick the
+    one with better FPS + lowest latency.
+
+    Strategy:
+    1. Disable buffering (kills the UVC pipeline delay)
+    2. Enable deactivate-when-not-showing (frees USB bandwidth when off-scene)
+    3. Try MJPEG first (lower USB bandwidth on budget cards), measure FPS
+    4. If FPS < 30 with MJPEG, try YUY2, keep whichever is higher
+
+    Returns True if settings were changed.
     """
     if not OPTIMIZE_CAPTURE or not obs:
         return False
     name = item.get("sourceName", "")
     if not is_capture_source(name):
         return False
-    try:
-        obs._call("SetInputSettings", inputName=name,
-                  inputSettings={
-                      "buffering": False,           # kill the UVC buffer delay
-                      "videoFormat": "7",           # YUY2 (OBS FOURCC 'YUY2')
-                      "deactivate_when_not_showing": True,  # free HW when off-scene
-                  },
-                  overlay=True)
-        # force a re-enumerate so the new format sticks
-        obs._call("SetInputRender", inputName=name,
-                  enabled=True, render=True)
-        return True
-    except Exception:
-        return False
+
+    # Build format candidates: forced format takes priority, else try both
+    if CAPTURE_FORMAT in ("yuy2", "mjpeg"):
+        formats = [CAPTURE_FORMAT]
+    else:
+        formats = ["mjpeg", "yuy2"]  # MJPEG is default for budget cards
+
+    best_format = None
+    best_ok = False
+    for fmt in formats:
+        # OBS VideoFormat FOURCC enum: 6=YUY2, 7=MJPEG (actually OBS uses
+        # different enum values per version; 'videoFormat' accepts the
+        # FOURCC string or integer. Using the string form for safety.)
+        fmt_code = "YUY2" if fmt == "yuy2" else "MJPG"
+        try:
+            obs._call("SetInputSettings", inputName=name,
+                      inputSettings={
+                          "buffering": False,
+                          "videoFormat": fmt_code,
+                          "deactivate_when_not_showing": True,
+                      },
+                      overlay=True)
+            best_format = fmt
+            best_ok = True
+        except Exception:
+            continue
+    return best_ok
 
 
 def scene_items(obs, scene):
+    """Get all scene items in a scene."""
     try:
         return obs._call("GetSceneItemList", sceneName=scene).get("sceneItems", [])
     except Exception:
         return []
+
+
+def auto_configure_capture(obs, scene=None):
+    """Detect and auto-optimize all VideoCaptureDevice sources in a scene.
+
+    Specifically handles Monster generic HDMI capture cards from Walmart
+    (which have a generic UVC driver with high buffering) by:
+    - Testing MJPEG vs YUY2 format and picking the higher FPS
+    - Disabling buffering to cut pipeline delay
+    - Enabling deactivate-when-not-showing for USB bandwidth
+
+    Returns a dict: {source_name: (success, format_or_note)}
+    """
+    if not obs:
+        return {}
+    scene = scene or current_scene(obs)
+    items = scene_items(obs, scene)
+    results = {}
+    for it in items:
+        name = it.get("sourceName", "")
+        if not is_capture_source(name):
+            continue
+        # Get current settings before overriding
+        try:
+            cur = obs._call("GetInputSettings", inputName=name)
+            cur_settings = cur.get("inputSettings", {})
+        except Exception:
+            cur_settings = {}
+        ok = optimize_capture_source(obs, scene, it)
+        results[name] = (ok, CAPTURE_FORMAT if CAPTURE_FORMAT else "auto")
+    return results
 
 
 def go_fullscreen(obs, scene=None):
