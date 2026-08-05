@@ -33,6 +33,12 @@ import os
 import sys
 import time
 
+try:
+    import websocket
+except ImportError:
+    sys.stderr.write("FATAL: pip install websocket-client\n")
+    raise
+
 
 class ObsError(RuntimeError):
     pass
@@ -94,13 +100,6 @@ class ObsCohost:
 
     # ---- connection + auth ----
     def connect(self):
-        # Lazy import: keeps `import wubu_obs` safe even when the websocket-client
-        # dep isn't on the default path (e.g. when imported by the cohost loop
-        # under a different venv). Only fails if truly missing at connect time.
-        try:
-            import websocket
-        except ImportError:
-            raise ObsError("websocket-client not installed; pip install websocket-client")
         self._ws = websocket.create_connection(self.url, timeout=self.timeout)
         hello = json.loads(self._ws.recv())
         if hello.get("op") != 0:  # Hello
@@ -214,20 +213,26 @@ class ObsCohost:
             # source may not exist yet; that's fine — caller creates it
             return {"warn": str(e)}
 
-    def speak(self, mood="neutral", text=None):
+    def speak(self, mood="neutral", text=None, mode="live"):
         """Push cohost state into the face overlay via a local state file the
         browser source polls. Decouples WuBuDesk from OBS render timing.
 
-        The overlay (face/index.html) fetches `face_state.json` RELATIVE to its
-        own location, so we write next to it by default. Override with the
-        WUBU_FACE_DIR env var (e.g. if OBS serves the page from elsewhere)."""
-        face_dir = os.environ.get("WUBU_FACE_DIR") or os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "face")
-        os.makedirs(face_dir, exist_ok=True)
-        state = {"mood": mood, "text": text, "ts": time.time()}
+        mode: "live" (stream overlay) or "movie" (recorded avatar).
+        The state file lives in the face/ directory so the browser source
+        can fetch it over localhost:8137 or via file:// access."""
+        state = {
+            "mood": mood,
+            "text": text,
+            "speaking": bool(text),
+            "speak_ms": time.time(),
+            "ts": time.time(),
+            "mode": mode,
+        }
+        face_path = os.environ.get("WUBU_FACE_DIR",
+                                   r"C:/Users/eman5/WuBuMedia/face/face_state.json")
         try:
-            with open(os.path.join(face_dir, "face_state.json"), "w") as f:
+            os.makedirs(os.path.dirname(face_path), exist_ok=True)
+            with open(face_path, "w") as f:
                 json.dump(state, f)
         except OSError:
             pass
@@ -235,7 +240,6 @@ class ObsCohost:
 
 
 def main():
-    import os
     pw = os.environ.get("OBS_WS_PASSWORD")
     if not pw:
         # read the LIVE password from OBS's websocket config (it regenerates on migration)

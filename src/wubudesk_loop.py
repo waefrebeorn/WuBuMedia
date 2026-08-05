@@ -16,57 +16,84 @@ import sys
 import time
 import urllib.request
 
-BRAIN = os.environ.get("WUBU_BRAIN") or "http://127.0.0.1:57064/v1/chat/completions"
+# BRAIN = quips/talking only (text). Default is the local :57065 online proxy
+# (nemotron-3-super-120b) -- NOT :57064, which was the local GPU hog killed on
+# 2026-08-04 to give the stream encoder its VRAM back. Eyes live in wubu_vision.
+BRAIN = os.environ.get("WUBU_BRAIN") or "http://127.0.0.1:57065/v1/chat/completions"
 STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "knowledge", "rig_state.json")
 
 
+VISION_PROMPT = ("Describe exactly what is on this screen: the game or app in "
+                 "focus, what the streamer is doing, and anything notable on "
+                 "screen. Terse, 2 sentences. Do not repeat this instruction.")
+
+
 def perceive():
+    """Take a screenshot. Returns (png_path, "") -- the b64 slot is legacy;
+    wubu_vision does its own downscale+encode so we never carry a 2 MB blob."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from wubu_desktop import screenshot
-    png = screenshot()
-    return png, base64.b64encode(open(png, "rb").read()).decode()
+    return screenshot(), ""
 
 
-def think(b64):
-    payload = {
-        "model": "local",
-        "messages": [{"role": "user", "content": [
-            {"type": "text", "text": "You are WuBuDesk, the AGI cohost on this "
-             "Windows stream rig. Briefly state what is on screen and the rig "
-             "state (streaming? gaming? idle? what apps are open). Be terse."},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + b64}}]}],
-        "max_tokens": 140, "temperature": 0.3}
-    req = urllib.request.Request(BRAIN, data=json.dumps(payload).encode(),
-                                 headers={"Content-Type": "application/json"})
-    r = json.loads(urllib.request.urlopen(req, timeout=60).read())
-    out = r["choices"][0]["message"]["content"]
-    return sanitize_brain(out)
+def think(png_path):
+    """EYES: online vision (0 local VRAM). See wubu_vision for the why --
+    the local model was starving the stream encoder on an 8 GB card."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import wubu_vision
+        return sanitize_brain(wubu_vision.see(png_path, VISION_PROMPT))
+    except Exception as e:
+        print("vision:", e)
+        return ""
 
 
 def sanitize_brain(text):
-    """Strip model preamble/instruction-leak (NVIDIA nemotron sometimes echoes
-    the prompt, e.g. 'We need to respond as WuBuDesk...' or 'Okay, the user
-    just said...'). Keep only the cohost's actual line for the overlay."""
+    """Strip model preamble/instruction-leak before it hits the OBS overlay.
+
+    The :57065 nemotron proxy is a reasoning model and routinely emits its
+    scratchpad first, e.g. 'We need to output only a short cheeky line ... So
+    something like: "Just survived another click"'. Verified on-rig 2026-08-04.
+    Strategy: drop any leading reasoning clause, then prefer the quoted payload
+    the model actually settled on.
+    """
     if not text:
         return ""
     t = text.strip()
     low = t.lower()
-    # drop leading instruction echoes
-    for pre in ("we need to respond", "okay, the user", "the user just said",
-                "you are wubudesk", "as wubudesk", "sure, here", "here is a",
-                "here's a"):
-        if low.startswith(pre):
-            # cut to first sentence boundary after the preamble
-            idx = t.find(". ")
-            if idx > 0:
-                t = t[idx+2:].strip()
-            else:
-                t = ""
-    # if it still contains the prompt verbatim, blank it
-    if "windows stream rig" in t.lower() or "briefly state what is on screen" in t.lower():
+
+    # 1) reasoning scratchpad -> keep only what follows the give-away connector
+    leaks = ("we need to", "okay, the user", "the user just said", "the user wants",
+             "you are wubudesk", "as wubudesk", "sure, here", "here is a",
+             "here's a", "let's ", "i should ")
+    leaked = any(low.startswith(p) for p in leaks)
+    if leaked:
+        for marker in ("so something like:", "something like:", "for example:",
+                       "line:", "output:"):
+            idx = low.rfind(marker)
+            if idx >= 0:
+                t = t[idx + len(marker):].strip()
+                break
+        else:
+            # no connector -> take the last sentence, which is usually the answer
+            parts = [s for s in t.split(". ") if s.strip()]
+            t = parts[-1].strip() if len(parts) > 1 else ""
+
+        # 2) the model's settled answer is usually the quoted span. ONLY safe
+        # after a detected leak: vision text quotes game titles ('the "Games"
+        # tab ... "The Last of Us Part I"') and this would scalp it mid-sentence.
+        if t.count('"') >= 2:
+            first, last = t.find('"'), t.rfind('"')
+            if last > first + 1:
+                t = t[first + 1:last].strip()
+
+    # 3) prompt echoed verbatim -> unusable
+    if ("windows stream rig" in t.lower()
+            or "briefly state what is on screen" in t.lower()
+            or "do not repeat this instruction" in t.lower()):
         t = ""
-    return t[:300]
+    return t.strip(' "\'')[:300]
 
 
 def record(text):
@@ -107,11 +134,12 @@ def guard_state():
 
 
 def guard_allows_voice():
-    """Voice (Kokoro) is CPU-bound and can contend with stream encoding.
-    Defer it when boss is streaming or gaming, per the resource directive."""
+    """Voice (Piper, CPU-only) is light -- RTF ~0.17 on this rig.
+    Defer only during GAMING (game needs every CPU cycle); STREAMING is fine
+    because Piper's CPU cost (~15% one core) never touches NVENC."""
     v = guard_state()
     state = v.get("state")
-    if state in ("STREAMING", "GAMING"):
+    if state == "GAMING":
         return False, state
     return True, state
 
@@ -339,8 +367,8 @@ def loop(interval, max_iter, do_speak=False, conversational=False):
             if (max_iter or 1) > 1 and i + 1 < (max_iter or 1):
                 time.sleep(interval)
             continue
-        png, b64 = perceive()
-        out = think(b64)
+        png, _ = perceive()
+        out = think(png)
         record(out)
         # mood from rig state: idle/gaming/streaming -> happy; error -> angry
         mood = "happy"

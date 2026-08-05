@@ -1,255 +1,390 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<title>WuBuDesk — the wizard in your computer (Interactive Buddy)</title>
-<!-- SPDX-License-Identifier: WaefreBeorn-UMV3 -->
-<!-- Interactive Buddy cohost: you can GRAB / FLING / POKE the sigil and it
-     reacts with physics + personality. State is pushed to face_state.json by
-     wubudesk_loop.py; interaction impulses are POSTed to the loop via the
-     browser bridge (WS :18765) so the online brain can quip back.
-     Falls back to localStorage echo if the bridge is absent (OBS-safe). -->
+<meta charset="utf-8"/>
+<title>WuBuDesk — entity</title>
+<!-- SPDX-License-Identifier: WaefreBeorn-UMV3
+     Boss 2026-08-04: "the orb sucks, make a full entity."
+
+     So: an actual creature. Head, eyes with lids and pupils that track, a
+     mouth that lip-syncs, ear-fins that flick, arms that swing with momentum,
+     a tail that trails, and a body that squashes when it lands. Hand-built
+     SVG + CSS transforms driven by one rAF loop -- no Live2D runtime, no
+     three.js, no dependency, nothing to license. Runs in an OBS browser
+     source at 1920x1080 with zero interaction required.
+
+     It reads face_state.json (mood/text/heard/speaking) and stage.json
+     (where the real OBS furniture is, so it never sits on chat).           -->
 <style>
-  :root{
-    --neon:#39ff14; --neon2:#00e5ff; --warn:#ffd166; --sad:#7aa2ff; --angry:#ff5d5d;
-    --bg: rgba(0,0,0,0);
-  }
-  html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;
-    font-family:"Segoe UI",system-ui,sans-serif;cursor:grab;}
-  body.grabbing{cursor:grabbing;}
-  #stage{position:fixed;inset:0;display:flex;flex-direction:column;
-    align-items:center;justify-content:flex-end;padding-bottom:5vh;gap:10px;}
+  html,body{margin:0;height:100%;background:transparent;overflow:hidden;
+    font-family:"Segoe UI",system-ui,sans-serif;user-select:none;cursor:default}
+  #ent{position:absolute;width:230px;height:270px;left:60%;top:55%;
+    will-change:transform;transform-origin:50% 92%}
+  svg{overflow:visible;display:block}
 
-  /* ---- the sigil: a rotating rune ring + the all-seeing eye ---- */
-  #sigil{position:relative;width:180px;height:180px;will-change:transform;
-    touch-action:none;user-select:none;}
-  #ring{position:absolute;inset:0;border-radius:50%;
-    border:2px solid var(--neon);border-top-color:transparent;border-left-color:transparent;
-    box-shadow:0 0 22px var(--neon),inset 0 0 18px rgba(57,255,20,.25);
-    animation:spin 9s linear infinite;}
-  #ring2{position:absolute;inset:18px;border-radius:50%;
-    border:1px dashed var(--neon2);border-bottom-color:transparent;
-    box-shadow:0 0 14px var(--neon2);animation:spin 6s linear infinite reverse;}
-  @keyframes spin{to{transform:rotate(360deg);}}
-  #eye{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
-    width:74px;height:74px;border-radius:50%;
-    background:radial-gradient(circle at 50% 50%,#031 0%,#012 70%);
-    box-shadow:0 0 26px var(--neon),inset 0 0 16px rgba(0,229,255,.4);
-    overflow:hidden;}
-  #iris{position:absolute;top:50%;left:50%;width:34px;height:34px;border-radius:50%;
-    background:radial-gradient(circle at 50% 40%,var(--neon2),var(--neon) 70%,#063 100%);
-    box-shadow:0 0 18px var(--neon);transform:translate(-50%,-50%);
-    transition:transform .08s ease-out;}
-  #pupil{position:absolute;top:50%;left:50%;width:12px;height:12px;border-radius:50%;
-    background:#000;transform:translate(-50%,-50%);transition:transform .08s ease-out;}
-  #lid{position:absolute;inset:0;background:#012;border-radius:50%;
-    transform:scaleY(0);transform-origin:center;transition:transform .12s ease;}
-  #mouth{position:absolute;top:78%;left:50%;transform:translate(-50%,-50%) scaleY(0.05);
-    width:26px;height:14px;background:#012;border-radius:0 0 14px 14px;
-    box-shadow:0 0 8px var(--neon);transition:transform .06s linear;opacity:.9;}
-  body.blink #lid{transform:scaleY(1);}
-  #glint{position:absolute;top:38%;left:42%;width:10px;height:10px;border-radius:50%;
-    background:rgba(255,255,255,.85);filter:blur(1px);}
+  /* ---- bubble ---- */
+  #bub{position:absolute;max-width:430px;padding:13px 17px;border-radius:16px;
+    background:rgba(10,14,22,.93);color:#eaf6ff;font-size:20px;line-height:1.34;
+    border:2px solid var(--gl,#49f0c0);opacity:0;transform:translateY(8px) scale(.97);
+    transition:opacity .18s,transform .18s;pointer-events:none;
+    box-shadow:0 8px 34px rgba(0,0,0,.55),0 0 22px var(--gl,#49f0c0)3a;
+    text-shadow:0 1px 3px #000;z-index:5}
+  #bub.on{opacity:1;transform:translateY(0) scale(1)}
+  #bub:after{content:'';position:absolute;bottom:-11px;left:34px;width:0;height:0;
+    border:11px solid transparent;border-top-color:rgba(10,14,22,.93);border-bottom:0}
 
-  /* squish on poke/fling */
-  #sigil.hit{animation:squish .28s ease;}
-  @keyframes squish{0%{transform:scale(1,1)}30%{transform:scale(1.25,.7)}60%{transform:scale(.85,1.15)}100%{transform:scale(1,1)}}
+  /* ---- what it heard ---- */
+  #hrd{position:absolute;max-width:380px;padding:7px 12px;border-radius:11px;
+    background:rgba(0,0,0,.5);color:#8fa6bb;font-size:14px;font-style:italic;
+    opacity:0;transition:opacity .3s;pointer-events:none;z-index:4}
+  #hrd.on{opacity:1}
 
-  #hud{display:flex;gap:14px;color:#9fe;font-family:"Consolas",monospace;font-size:12px;
-    text-shadow:0 0 6px var(--neon);opacity:.82;}
-  .stat{background:rgba(8,16,12,.35);border:1px solid rgba(57,255,20,.3);
-    border-radius:8px;padding:3px 9px;backdrop-filter:blur(2px);}
-  .stat b{color:var(--neon);}
-  #name{color:var(--neon);font-weight:800;letter-spacing:3px;font-size:20px;
-    text-shadow:0 0 12px var(--neon);}
-  #ticker{max-width:72vw;color:#bfe;font-size:15px;text-align:center;
-    text-shadow:0 0 8px #0f0;min-height:20px;line-height:1.35;}
-  #mode{position:fixed;top:12px;right:16px;color:#8fa;font-size:12px;
-    font-family:monospace;opacity:.7;}
+  /* ---- name tag ---- */
+  #tag{position:absolute;padding:3px 11px;border-radius:9px;font-size:12.5px;
+    letter-spacing:2.4px;font-weight:700;color:#04121a;
+    background:var(--gl,#49f0c0);opacity:.94;pointer-events:none;z-index:4;
+    box-shadow:0 3px 14px rgba(0,0,0,.5)}
+  /* cohost vital-signs HUD (subtle, bottom-left) */
+  #stat{position:absolute;left:18px;bottom:18px;max-width:420px;padding:4px 10px;
+    border-radius:8px;font-size:12px;font-family:"SF Mono",monospace;
+    background:rgba(10,14,22,.6);color:#8fa6bb;opacity:0;
+    transition:opacity .2s;pointer-events:none;z-index:4;
+    box-shadow:0 2px 12px rgba(0,0,0,.4)}
+  #stat.on{opacity:.82}
 
-  body[data-mood="happy"]  #ring,#eye{box-shadow:0 0 26px var(--neon),inset 0 0 16px rgba(57,255,20,.4);}
-  body[data-mood="happy"]  #iris{background:radial-gradient(circle at 50% 40%,#aaffaa,var(--neon) 70%,#063 100%);}
-  body[data-mood="thinking"] #sigil{animation:float 2.2s ease-in-out infinite;}
-  body[data-mood="thinking"] #ring{animation:spin 3s linear infinite;}
-  body[data-mood="sad"]   #eye,#ring{box-shadow:0 0 22px var(--sad),inset 0 0 14px rgba(122,162,255,.4);}
-  body[data-mood="sad"]   #iris{background:radial-gradient(circle at 50% 40%,#cdd9ff,var(--sad) 70%,#023 100%);}
-  body[data-mood="angry"] #eye,#ring{box-shadow:0 0 26px var(--angry),inset 0 0 16px rgba(255,93,93,.4);}
-  body[data-mood="angry"] #iris{background:radial-gradient(circle at 50% 40%,#ffb3b3,var(--angry) 70%,#300 100%);}
-  body[data-mood="dizzy"] #sigil{animation:wobble .5s ease-in-out infinite;}
-  @keyframes wobble{0%,100%{transform:rotate(-8deg)}50%{transform:rotate(8deg)}}
-  @keyframes float{0%,100%{transform:translateY(0);}50%{transform:translateY(-10px);}}
-
-  .p{position:fixed;width:3px;height:3px;border-radius:50%;background:var(--neon);
-    box-shadow:0 0 8px var(--neon);opacity:.5;animation:drift linear infinite;}
-  @keyframes drift{from{transform:translateY(100vh);}to{transform:translateY(-10vh);}}
-  #hint{position:fixed;bottom:8px;left:10px;color:#6a8;font-size:11px;opacity:.5;font-family:monospace;}
+  .blink{animation:bl .16s ease}
+  @keyframes bl{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.06)}}
 </style>
 </head>
-<body data-mood="neutral" data-mode="live">
-  <div id="mode">WuBuDesk · UMV3 · LIVE</div>
-  <div id="stage">
-    <div id="hat"><div id="hatbrim"></div><div id="hatcone"></div><div id="sigilmark">W·B</div></div>
-    <div id="sigil">
-      <div id="ring"></div><div id="ring2"></div>
-      <div id="eye"><div id="iris"><div id="pupil"></div></div><div id="glint"></div><div id="lid"></div></div>
-      <div id="mouth"></div>
-    </div>
-    <div id="hud">
-      <span class="stat">GPU <b id="s_gpu">2080S</b></span>
-      <span class="stat">CPU <b id="s_cpu">R5-3600</b></span>
-      <span class="stat">BRAIN <b id="s_brain">NVIDIA</b></span>
-      <span class="stat">ETHOS <b id="s_ethos">stream</b></span>
-    </div>
-    <div id="name">WuBuDesk</div>
-    <div id="ticker">online · grab me, fling me, poke me — I'm your Interactive Buddy</div>
-  </div>
-  <div id="hint">drag = grab · flick = throw · tap = poke</div>
+<body>
+<div id="bub"></div>
+<div id="hrd"></div>
+<div id="tag">WUBUDESK</div>
+<div id="stat"></div>
+
+<div id="ent">
+<svg id="svg" width="230" height="270" viewBox="0 0 230 270">
+  <defs>
+    <radialGradient id="bodyG" cx="42%" cy="30%">
+      <stop offset="0%"  stop-color="#2a5f72"/>
+      <stop offset="55%" stop-color="#123243"/>
+      <stop offset="100%" stop-color="#08161f"/>
+    </radialGradient>
+    <linearGradient id="finG" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="var(--gl,#49f0c0)" stop-opacity=".95"/>
+      <stop offset="100%" stop-color="var(--gl,#49f0c0)" stop-opacity=".25"/>
+    </linearGradient>
+    <filter id="glow" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2.2"/>
+    </filter>
+  </defs>
+
+  <!-- ground shadow -->
+  <ellipse id="shadow" cx="115" cy="256" rx="54" ry="10"
+           fill="#000" opacity=".34" filter="url(#soft)"/>
+
+  <!-- tail: trails behind with lag -->
+  <path id="tail" d="M115 210 Q 150 226 168 250" stroke="url(#finG)"
+        stroke-width="9" fill="none" stroke-linecap="round" opacity=".85"/>
+
+  <!-- BODY -->
+  <g id="bodyG_">
+    <!-- arms (behind torso) -->
+    <g id="armL"><path d="M74 158 Q 52 176 48 198" stroke="#1b4557"
+       stroke-width="15" fill="none" stroke-linecap="round"/>
+       <circle cx="48" cy="200" r="10" fill="#236274"/></g>
+    <g id="armR"><path d="M156 158 Q 178 176 182 198" stroke="#1b4557"
+       stroke-width="15" fill="none" stroke-linecap="round"/>
+       <circle cx="182" cy="200" r="10" fill="#236274"/></g>
+
+    <!-- torso -->
+    <path id="torso" d="M115 118 C 168 118 176 168 172 206
+                        C 169 236 146 248 115 248
+                        C 84 248 61 236 58 206
+                        C 54 168 62 118 115 118Z"
+          fill="url(#bodyG)" stroke="var(--gl,#49f0c0)" stroke-width="2.4"
+          stroke-opacity=".55"/>
+    <!-- chest sigil: the old orb, demoted to a heart -->
+    <circle id="core" cx="115" cy="182" r="15" fill="var(--gl,#49f0c0)"
+            opacity=".9" filter="url(#glow)"/>
+    <circle cx="115" cy="182" r="26" fill="none" stroke="var(--gl,#49f0c0)"
+            stroke-width="1.4" stroke-opacity=".4" stroke-dasharray="5 7">
+      <animateTransform attributeName="transform" type="rotate"
+        from="0 115 182" to="360 115 182" dur="14s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+
+  <!-- HEAD -->
+  <g id="head">
+    <!-- ear fins -->
+    <path id="finL" d="M62 74 Q 30 56 22 24 Q 54 34 70 58Z" fill="url(#finG)"/>
+    <path id="finR" d="M168 74 Q 200 56 208 24 Q 176 34 160 58Z" fill="url(#finG)"/>
+
+    <ellipse id="skull" cx="115" cy="82" rx="60" ry="54"
+             fill="url(#bodyG)" stroke="var(--gl,#49f0c0)" stroke-width="2.6"
+             stroke-opacity=".65"/>
+
+    <!-- brow ridge, drops when angry -->
+    <g id="brows" opacity="0">
+      <path d="M78 52 L108 62" stroke="var(--gl,#49f0c0)" stroke-width="5"
+            stroke-linecap="round"/>
+      <path d="M152 52 L122 62" stroke="var(--gl,#49f0c0)" stroke-width="5"
+            stroke-linecap="round"/>
+    </g>
+
+    <!-- eyes -->
+    <g id="eyeL">
+      <ellipse class="wht" cx="92" cy="80" rx="19" ry="21" fill="#04141b"/>
+      <circle class="pup" cx="92" cy="80" r="10.5" fill="var(--gl,#49f0c0)"
+              filter="url(#glow)"/>
+      <circle class="shine" cx="88" cy="75" r="3.6" fill="#eaffff" opacity=".9"/>
+      <ellipse class="lid" cx="92" cy="80" rx="20" ry="21" fill="#0d2733"
+               style="transform-box:fill-box;transform-origin:50% 50%"/>
+    </g>
+    <g id="eyeR">
+      <ellipse class="wht" cx="138" cy="80" rx="19" ry="21" fill="#04141b"/>
+      <circle class="pup" cx="138" cy="80" r="10.5" fill="var(--gl,#49f0c0)"
+              filter="url(#glow)"/>
+      <circle class="shine" cx="134" cy="75" r="3.6" fill="#eaffff" opacity=".9"/>
+      <ellipse class="lid" cx="138" cy="80" rx="20" ry="21" fill="#0d2733"
+               style="transform-box:fill-box;transform-origin:50% 50%"/>
+    </g>
+
+    <!-- mouth: rx/ry driven by the lip-sync loop -->
+    <ellipse id="mouth" cx="115" cy="116" rx="13" ry="3"
+             fill="#03222c" stroke="var(--gl,#49f0c0)" stroke-width="2"/>
+    <path id="smile" d="M100 114 Q 115 124 130 114" stroke="var(--gl,#49f0c0)"
+          stroke-width="3" fill="none" stroke-linecap="round" opacity="0"/>
+  </g>
+</svg>
+</div>
+
 <script>
-  // ambient particles
-  for(let i=0;i<14;i++){const d=document.createElement('div');d.className='p';
-    d.style.left=(Math.random()*100)+'vw';d.style.animationDuration=(8+Math.random()*10)+'s';
-    d.style.animationDelay=(-Math.random()*12)+'s';document.body.appendChild(d);}
+(()=>{
+const ent=document.getElementById('ent'), svg=document.getElementById('svg');
+const bub=document.getElementById('bub'), hrd=document.getElementById('hrd');
+const tag=document.getElementById('tag'), head=document.getElementById('head');
+const mouth=document.getElementById('mouth'), smile=document.getElementById('smile');
+const brows=document.getElementById('brows'), tail=document.getElementById('tail');
+const armL=document.getElementById('armL'), armR=document.getElementById('armR');
+const finL=document.getElementById('finL'), finR=document.getElementById('finR');
+const core=document.getElementById('core'), shadow=document.getElementById('shadow');
+const statEl=document.getElementById('stat');
+const lids=[...document.querySelectorAll('.lid')];
+const pups=[...document.querySelectorAll('.pup')];
+const shines=[...document.querySelectorAll('.shine')];
 
-  const sigil=document.getElementById('sigil');
-  const iris=document.getElementById('iris'),pupil=document.getElementById('pupil');
-  const mouth=document.getElementById('mouth');
-  const stage=document.getElementById('stage');
+const MOOD={
+  happy:  {gl:'#49f0c0', brow:0,   smile:1},
+  smug:   {gl:'#9be36a', brow:.35, smile:1},
+  thinking:{gl:'#6fc3ff',brow:.2,  smile:0},
+  angry:  {gl:'#ff6b5e', brow:1,   smile:0},
+  dizzy:  {gl:'#ffd45e', brow:0,   smile:0},
+  bored:  {gl:'#8fa6bb', brow:.15, smile:0},
+  sad:    {gl:'#7f8fe0', brow:.5,  smile:0}
+};
+let mood='happy';
+function setMood(m){
+  const c=MOOD[m]||MOOD.happy; mood=m;
+  document.documentElement.style.setProperty('--gl',c.gl);
+  brows.style.opacity=c.brow;
+  smile.style.opacity=c.smile;
+  tag.style.background=c.gl;
+}
+setMood('happy');
 
-  // ---- physics state ----
-  let pos={x: window.innerWidth/2, y: window.innerHeight*0.55};
-  let vel={x:0,y:0};
-  let grabbed=false, last={x:0,y:0,t:0}, vSamples=[];
-  let idleFloat=0, lastPoke=0;
+// ---------- physics ----------
+const pos={x:innerWidth*.62,y:innerHeight*.5}, vel={x:0,y:0};
+let grabbed=false,gx=0,gy=0,lastPtr={x:0,y:0,t:0},idle=0,land=0;
+let tailLag={x:pos.x,y:pos.y}, headLag=0;
 
-  function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+svg.addEventListener('pointerdown',e=>{
+  grabbed=true;gx=e.clientX-pos.x;gy=e.clientY-pos.y;
+  lastPtr={x:e.clientX,y:e.clientY,t:performance.now()};
+  svg.setPointerCapture(e.pointerId);
+  send({kind:'grab'});
+});
+addEventListener('pointermove',e=>{
+  if(!grabbed)return;
+  pos.x=e.clientX-gx;pos.y=e.clientY-gy;
+  const dt=Math.max(1,performance.now()-lastPtr.t);
+  vel.x=(e.clientX-lastPtr.x)/dt*15; vel.y=(e.clientY-lastPtr.y)/dt*15;
+  lastPtr={x:e.clientX,y:e.clientY,t:performance.now()};
+});
+addEventListener('pointerup',()=>{
+  if(!grabbed)return; grabbed=false;
+  const p=Math.round(Math.hypot(vel.x,vel.y));
+  if(p>14){setMood('dizzy');send({kind:'fling',power:p});}
+});
+svg.addEventListener('click',e=>{
+  if(Math.hypot(vel.x,vel.y)>6)return;
+  setMood('angry');vel.y-=7;vel.x+=(Math.random()-.5)*8;
+  send({kind:'poke'});
+});
+function send(m){
+  fetch('/buddy',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(m)}).catch(()=>{});
+}
 
-  // eye follows cursor (unless grabbed -> looks where thrown)
-  addEventListener('mousemove',e=>{
-    if(grabbed) return;
-    const r=document.getElementById('eye').getBoundingClientRect();
-    const cx=r.left+r.width/2, cy=r.top+r.height/2;
-    const dx=e.clientX-cx, dy=e.clientY-cy, d=Math.hypot(dx,dy)||1;
-    const m=Math.min(d,22);
-    iris.style.transform=`translate(calc(-50% + ${dx/d*m}px),calc(-50% + ${dy/d*m}px))`;
-    pupil.style.transform=`translate(calc(-50% + ${dx/d*m*1.4}px),calc(-50% + ${dy/d*m*1.4}px))`;
-  });
-  setInterval(()=>{document.body.classList.add('blink');setTimeout(()=>document.body.classList.remove('blink'),130);},3200);
-
-  // ---- interaction ----
-  function toLocal(e){return {x:e.clientX, y:e.clientY};}
-  function onDown(e){
-    grabbed=true; document.body.classList.add('grabbing');
-    const p=toLocal(e); last=p; vSamples=[]; vel={x:0,y:0};
-    sigil.style.animation=''; // stop idle float while held
-    e.preventDefault();
-  }
-  function onMove(e){
-    if(!grabbed) return;
-    const p=toLocal(e);
-    const now=performance.now();
-    pos.x=p.x; pos.y=p.y;
-    const dt=Math.max(1, now-last.t);
-    vSamples.push({x:(p.x-last.x)/dt, y:(p.y-last.y)/dt});
-    if(vSamples.length>4) vSamples.shift();
-    last=p; last.t=now;
-    e.preventDefault();
-  }
-  function onUp(e){
-    if(!grabbed) return;
-    grabbed=false; document.body.classList.remove('grabbing');
-    // fling velocity = avg recent sample (px/ms)
-    if(vSamples.length){
-      const a=vSamples.reduce((s,v)=>({x:s.x+v.x,y:s.y+v.y}),{x:0,y:0});
-      vel.x=a.x/vSamples.length*16;  // -> px/frame (~60fps)
-      vel.y=a.y/vSamples.length*16;
+// ---------- stage awareness ----------
+let zones=[],cw=1920,ch=1080;
+async function stage(){try{
+  const r=await fetch('stage.json?c='+Date.now()); if(!r.ok)return;
+  const s=await r.json(); zones=s.zones||[];
+  if(s.canvas){cw=s.canvas.w;ch=s.canvas.h;}
+}catch(e){}}
+stage();setInterval(stage,5000);
+const sx=v=>v*innerWidth/cw, sy=v=>v*innerHeight/ch;
+function avoid(){
+  const R=120;
+  for(const z of zones){
+    const x1=sx(z.x),y1=sy(z.y),x2=sx(z.x+z.w),y2=sy(z.y+z.h);
+    if(pos.x+R>x1&&pos.x-R<x2&&pos.y+R>y1&&pos.y-R<y2){
+      const dl=pos.x-x1,dr=x2-pos.x,dt=pos.y-y1,db=y2-pos.y;
+      const m=Math.min(Math.abs(dl),Math.abs(dr),Math.abs(dt),Math.abs(db));
+      if(m===Math.abs(dl)){pos.x=x1-R;vel.x=-Math.abs(vel.x)*.5-.7;}
+      else if(m===Math.abs(dr)){pos.x=x2+R;vel.x=Math.abs(vel.x)*.5+.7;}
+      else if(m===Math.abs(dt)){pos.y=y1-R;vel.y=-Math.abs(vel.y)*.5-.7;}
+      else{pos.y=y2+R;vel.y=Math.abs(vel.y)*.5+.7;}
     }
-    const speed=Math.hypot(vel.x,vel.y);
-    if(speed>14){ // hard fling
-      setMood('dizzy'); bump('fling', Math.round(speed));
-    } else {
-      setMood('happy');
+  }
+}
+
+// ---------- blinking ----------
+function blink(){
+  lids.forEach(l=>{l.classList.remove('blink');void l.offsetWidth;l.classList.add('blink');});
+  setTimeout(blink,1600+Math.random()*4200);
+}
+lids.forEach(l=>l.style.transformOrigin='center');
+setTimeout(blink,900);
+
+// ---------- speech / lip-sync ----------
+let speaking=false,mouthT=0,talkUntil=0;
+function lipsync(dt){
+  if(speaking||performance.now()<talkUntil){
+    mouthT+=dt*0.019;
+    const open=3+Math.abs(Math.sin(mouthT))*11+Math.sin(mouthT*2.7)*3;
+    mouth.setAttribute('ry',Math.max(2,open).toFixed(1));
+    mouth.setAttribute('rx',(13+Math.sin(mouthT*1.3)*3).toFixed(1));
+  }else{
+    const ry=+mouth.getAttribute('ry');
+    mouth.setAttribute('ry',Math.max(3,ry*0.82).toFixed(1));
+  }
+}
+
+// ---------- main loop ----------
+const G=.36,F=.986,B=.7;
+let prev=performance.now();
+function frame(now){
+  const dt=Math.min(48,now-prev); prev=now;
+  if(!grabbed){
+    vel.y+=G;pos.x+=vel.x;pos.y+=vel.y;vel.x*=F;vel.y*=F;
+    const W=innerWidth,H=innerHeight;
+    if(pos.x<125){pos.x=125;vel.x=-vel.x*B;}
+    if(pos.x>W-125){pos.x=W-125;vel.x=-vel.x*B;}
+    if(pos.y<150){pos.y=150;vel.y=-vel.y*B;}
+    if(pos.y>H-150){
+      if(vel.y>2.4)land=Math.min(1,vel.y/16);
+      pos.y=H-150;vel.y=-vel.y*B; if(Math.abs(vel.y)<1)vel.y=0;
     }
-    e.preventDefault();
+    avoid();
+    if(Math.abs(vel.x)<.2&&Math.abs(vel.y)<.2){
+      idle+=.021;pos.y+=Math.sin(idle)*.34;
+      if(Math.random()<.0016){vel.x=(Math.random()-.5)*10;vel.y=-5-Math.random()*4;}
+    }else idle=0;
   }
-  sigil.addEventListener('pointerdown',onDown);
-  addEventListener('pointermove',onMove);
-  addEventListener('pointerup',onUp);
-  // tap = poke
-  let downT=0;
-  sigil.addEventListener('pointerdown',()=>downT=performance.now());
-  sigil.addEventListener('pointerup',()=>{
-    const dt=performance.now()-downT;
-    if(dt<220 && Math.hypot(vel.x,vel.y)<3){ poke(); }
-  });
+  land*=.9;
 
-  function poke(){
-    const now=performance.now();
-    if(now-lastPoke<250) return; lastPoke=now;
-    sigil.classList.remove('hit'); void sigil.offsetWidth; sigil.classList.add('hit');
-    setMood('angry');
-    bump('poke', 1);
-    setTimeout(()=>setMood('happy'),700);
-  }
+  // squash & stretch
+  const sq=1+land*.34, st=1-land*.24;
+  const lean=Math.max(-15,Math.min(15,vel.x*1.5));
+  ent.style.left=(pos.x-115)+'px';
+  ent.style.top=(pos.y-135)+'px';
+  ent.style.transform=`rotate(${lean.toFixed(1)}deg) scale(${st.toFixed(3)},${sq.toFixed(3)})`;
 
-  function setMood(m){ document.body.setAttribute('data-mood', m); }
+  // head lags the body -> feels alive
+  headLag+=((-lean*0.55)-headLag)*0.12;
+  head.setAttribute('transform',
+    `rotate(${headLag.toFixed(2)} 115 90) translate(0 ${(Math.sin(idle*1.3)*1.6).toFixed(2)})`);
 
-  // push interaction impulse to the loop (bridge WS :18765, else localStorage)
-  let ws=null;
-  try{ ws=new WebSocket('ws://127.0.0.1:18765'); }catch(e){ ws=null; }
-  function bump(kind, power){
-    const msg={type:'buddy_interaction', kind, power, ts:Date.now()};
-    if(ws && ws.readyState===1){ ws.send(JSON.stringify(msg)); }
-    try{ localStorage.setItem('buddy_interaction', JSON.stringify(msg)); }catch(e){}
-    // also drop a file the loop can read
-    try{
-      fetch('buddy_interaction.json?cb='+Date.now(),{method:'POST',
-        headers:{'Content-Type':'application/json'},body:JSON.stringify(msg)}).catch(()=>{});
-    }catch(e){}
-  }
+  // eyes track motion (look where you're going)
+  const px=Math.max(-6,Math.min(6,vel.x*.9)), py=Math.max(-5,Math.min(5,vel.y*.6));
+  pups.forEach((p,i)=>{p.setAttribute('cx',(i?138:92)+px);p.setAttribute('cy',80+py);});
+  shines.forEach((s,i)=>{s.setAttribute('cx',(i?134:88)+px*.8);s.setAttribute('cy',75+py*.8);});
 
-  // ---- physics loop (Interactive Buddy: gravity + wall bounce) ----
-  const GRAV=0.35, FRICT=0.985, BOUNCE=0.72;
-  function step(){
-    if(!grabbed){
-      vel.y += GRAV;
-      pos.x += vel.x; pos.y += vel.y;
-      vel.x *= FRICT; vel.y *= FRICT;
-      const W=window.innerWidth, H=window.innerHeight;
-      if(pos.x<90){pos.x=90; vel.x=-vel.x*BOUNCE;} if(pos.x>W-90){pos.x=W-90; vel.x=-vel.x*BOUNCE;}
-      if(pos.y<90){pos.y=90; vel.y=-vel.y*BOUNCE;} if(pos.y>H-90){pos.y=H-90; vel.y=-vel.y*BOUNCE; if(Math.abs(vel.y)<1)vel.y=0;}
-      // if basically settled and not moving, gentle idle float
-      if(Math.abs(vel.x)<0.2 && Math.abs(vel.y)<0.2){
-        idleFloat += 0.02; pos.y += Math.sin(idleFloat)*0.3;
-      } else { idleFloat=0; }
+  // arms swing with momentum
+  const sw=Math.max(-26,Math.min(26,-vel.x*2.2))+Math.sin(idle*1.1)*4;
+  armL.setAttribute('transform',`rotate(${sw.toFixed(1)} 74 158)`);
+  armR.setAttribute('transform',`rotate(${sw.toFixed(1)} 156 158)`);
+
+  // fins flick
+  const fk=Math.sin(now*.0035)*7+Math.max(-14,Math.min(14,vel.x*1.4));
+  finL.setAttribute('transform',`rotate(${(-fk).toFixed(1)} 62 74)`);
+  finR.setAttribute('transform',`rotate(${fk.toFixed(1)} 168 74)`);
+
+  // tail trails
+  tailLag.x+=((pos.x)-tailLag.x)*.12; tailLag.y+=((pos.y)-tailLag.y)*.1;
+  const tdx=Math.max(-42,Math.min(42,(tailLag.x-pos.x)*1.7));
+  const tdy=Math.max(-16,Math.min(28,(tailLag.y-pos.y)*1.1));
+  tail.setAttribute('d',`M115 210 Q ${150+tdx} ${226+tdy} ${168+tdx*1.5} ${250+tdy}`);
+
+  // core pulse
+  core.setAttribute('r',(15+Math.sin(now*.004)*1.9+(speaking?2.4:0)).toFixed(2));
+  shadow.setAttribute('rx',(54*st).toFixed(1));
+  shadow.setAttribute('opacity',(0.34*(1-Math.min(.6,(innerHeight-150-pos.y)/700))).toFixed(2));
+
+  lipsync(dt);
+
+  // bubbles ride along
+  bub.style.left=Math.min(innerWidth-450,Math.max(10,pos.x-60))+'px';
+  bub.style.top=Math.max(8,pos.y-140-bub.offsetHeight-14)+'px';
+  hrd.style.left=Math.min(innerWidth-400,Math.max(10,pos.x-50))+'px';
+  hrd.style.top=(pos.y+140)+'px';
+  tag.style.left=(pos.x-42)+'px'; tag.style.top=(pos.y+118)+'px';
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------- state polling ----------
+let lastTxt='',lastHeard='';
+async function poll(){
+  try{
+    const r=await fetch('face_state.json?c='+Date.now()); if(!r.ok)return;
+    const s=await r.json();
+    if(s.mood&&s.mood!==mood)setMood(s.mood);
+    speaking=!!s.speaking;
+    const t=(s.text||'').trim();
+    if(t!==lastTxt){
+      lastTxt=t;
+      if(t){bub.textContent=t;bub.classList.add('on');
+            talkUntil=performance.now()+Math.min(9000,1100+t.length*52);}
+      else bub.classList.remove('on');
     }
-    sigil.style.left=(pos.x-90)+'px';
-    sigil.style.top=(pos.y-90)+'px';
-    sigil.style.position='absolute';
-    requestAnimationFrame(step);
-  }
-  // init position
-  sigil.style.position='absolute';
-  sigil.style.left=(pos.x-90)+'px'; sigil.style.top=(pos.y-90)+'px';
-  step();
-
-  // ---- state polling from loop ----
-  async function tick(){
-    try{
-      const r=await fetch('face_state.json?cb='+Date.now());
-      if(!r.ok)return;
-      const s=await r.json();
-      if(s.mood && !grabbed) document.body.setAttribute('data-mood',s.mood);
-      if(s.mode) document.body.setAttribute('data-mode',s.mode);
-      if(s.text) document.getElementById('ticker').textContent=s.text;
-    }catch(e){}
-    try{
-      const rr=await fetch('rig_state.json?cb='+Date.now());
-      if(rr.ok){const g=await rr.json();
-        if(g.brain)document.getElementById('s_brain').textContent=g.brain;
-        if(g.ethos)document.getElementById('s_ethos').textContent=g.ethos;}
-    }catch(e){}
-  }
-  tick();setInterval(tick,1500);
+    const h=(s.heard||'').trim();
+    if(h!==lastHeard){
+      lastHeard=h;
+      if(h){hrd.textContent='“'+h+'”';hrd.classList.add('on');}
+      else hrd.classList.remove('on');
+    }
+    // --- cohost vital signs (transparency: let the stream see it think) ---
+    if(s.status && statEl){
+      const st=s.status;
+      statEl.textContent=[
+        st.voice ? `voice:${st.voice}` : '',
+        st.cuda ? `gpu:${st.cuda}` : '',
+        st.lessons!=null ? `lessons:${st.lessons}` : '',
+        st.rps ? `${st.rps}ms` : ''
+      ].filter(Boolean).join('  ');
+      statEl.classList.toggle('on', Boolean(st.voice||st.cuda||st.lessons!=null));
+    }
+  }catch(e){}
+}
+poll();setInterval(poll,420);
+})();
 </script>
 </body>
 </html>
