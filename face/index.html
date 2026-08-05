@@ -473,9 +473,10 @@ function applyState(s){
           talkUntil=performance.now()+Math.min(9000,1100+t.length*52);}
     else bub.classList.remove('on');
   }
+  const h=(s.heard||'').trim();
   if(h!==lastHeard){
     lastHeard=h;
-    if(h){hrd.textContent='"'h+'"';hrd.classList.add('on');}
+    if(h){hrd.textContent='"'+h+'"';hrd.classList.add('on');}
     else hrd.classList.remove('on');
   }
   // --- viseme string for precise lip-sync (from speech engine) ---
