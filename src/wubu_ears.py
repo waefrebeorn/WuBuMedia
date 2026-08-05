@@ -99,6 +99,7 @@ class Ears(threading.Thread):
         super().__init__(daemon=True)
         self.on_utterance = on_utterance
         self.device = device if device is not None else find_device()
+        self.target_device = self.device  # user's preferred device index
         self.gate = gate
         self.running = False
         self.enabled = True      # flipped off while the cohost speaks
@@ -106,6 +107,7 @@ class Ears(threading.Thread):
         self.heard_count = 0
         self.noise_floor = 0.0
         self._model = None
+        self._device_check_interval = 5.0  # re-probe device every 5s if lost
 
     # -- speech-to-text ----------------------------------------------------
     def _load_model(self):
@@ -156,43 +158,59 @@ class Ears(threading.Thread):
                     self.last_error = f"callback:{e}"
 
         try:
-            with sd.InputStream(samplerate=SR, channels=1, dtype="float32",
-                                blocksize=BLOCK, device=self.device) as stream:
-                # Calibrate to the actual room: a hardcoded gate is a guess, and
-                # on 2026-08-04 a 0.010 gate sat ABOVE the boss's normal speaking
-                # level (0.0076) so the cohost heard nothing. Measure, then gate
-                # just above the noise floor.
-                floor = []
-                for _ in range(int(CALIB_SECS * SR / BLOCK)):
-                    blk, _o = stream.read(BLOCK)
-                    floor.append(float(np.sqrt(np.mean(blk.reshape(-1) ** 2))))
-                noise = sorted(floor)[len(floor) // 2] if floor else 0.0
-                self.gate = max(RMS_GATE, noise * 2.5)
-                self.noise_floor = noise
-                print(f"[ears] noise={noise:.5f} gate={self.gate:.5f}", flush=True)
+            # Outer retry loop: reconnect on device loss/hot-plug.
+            while self.running:
+                try:
+                    with sd.InputStream(samplerate=SR, channels=1, dtype="float32",
+                                        blocksize=BLOCK, device=self.device) as stream:
+                        # Calibrate to the actual room: a hardcoded gate is a
+                        # guess, and on 2026-08-04 a 0.010 gate sat ABOVE the
+                        # boss's normal speaking level (0.0076) so the cohost
+                        # heard nothing. Measure, then gate just above noise.
+                        floor = []
+                        for _ in range(int(CALIB_SECS * SR / BLOCK)):
+                            blk, _o = stream.read(BLOCK)
+                            floor.append(float(np.sqrt(np.mean(blk.reshape(-1) ** 2))))
+                        noise = sorted(floor)[len(floor) // 2] if floor else 0.0
+                        self.gate = max(RMS_GATE, noise * 2.5)
+                        self.noise_floor = noise
+                        print(f"[ears] noise={noise:.5f} gate={self.gate:.5f}", flush=True)
 
-                while self.running:
-                    block, _ = stream.read(BLOCK)
-                    if not self.enabled:
-                        buf, speaking, quiet_since = [], False, None
-                        continue
-                    mono = block.reshape(-1)
-                    rms = float(np.sqrt(np.mean(mono ** 2)))
-                    now = time.time()
-                    if rms >= self.gate:
-                        if not speaking:
-                            speaking, started = True, now
-                        quiet_since = None
-                        buf.append(mono.copy())
-                    elif speaking:
-                        buf.append(mono.copy())      # keep trailing silence
-                        quiet_since = quiet_since or now
-                        if now - quiet_since >= SILENCE_HOLD:
-                            flush()
-                    if speaking and now - started >= MAX_UTTERANCE:
-                        flush()
-        except Exception as e:
-            self.last_error = f"stream:{e}"
+                        while self.running:
+                            if not self.enabled:
+                                buf, speaking, quiet_since = [], False, None
+                                time.sleep(0.1)
+                                continue
+                            try:
+                                block, _ = stream.read(BLOCK)
+                            except Exception as sd_err:
+                                # Device may have been unplugged/hot-plugged.
+                                self.last_error = f"device lost: {sd_err}"
+                                new_dev = find_device()
+                                if new_dev is not None and new_dev != self.device:
+                                    self.device = new_dev
+                                    break  # exit inner loop; outer loop reconnects
+                                time.sleep(0.5)
+                                continue
+                            mono = block.reshape(-1)
+                            rms = float(np.sqrt(np.mean(mono ** 2)))
+                            now = time.time()
+                            if rms >= self.gate:
+                                if not speaking:
+                                    speaking, started = True, now
+                                quiet_since = None
+                                buf.append(mono.copy())
+                            elif speaking:
+                                buf.append(mono.copy())      # keep trailing silence
+                                quiet_since = quiet_since or now
+                                if now - quiet_since >= SILENCE_HOLD:
+                                    flush()
+                            if speaking and now - started >= MAX_UTTERANCE:
+                                flush()
+                except Exception as e:
+                    self.last_error = f"stream:{e}"
+                    if self.running:
+                        time.sleep(1.0)  # backoff before retry
         finally:
             self.running = False
 

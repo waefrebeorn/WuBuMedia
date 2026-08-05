@@ -177,23 +177,37 @@ const statEl=document.getElementById('stat');
 const lids=[...document.querySelectorAll('.lid')];
 const pups=[...document.querySelectorAll('.pup')];
 const shines=[...document.querySelectorAll('.shine')];
+let e_mouseX=innerWidth/2,e_mouseY=innerHeight/2;
+let _idle_px=0,_idle_py=0;
 
 const MOOD={
-  happy:  {gl:'#49f0c0', brow:0,   smile:1},
-  smug:   {gl:'#9be36a', brow:.35, smile:1},
-  thinking:{gl:'#6fc3ff',brow:.2,  smile:0},
-  angry:  {gl:'#ff6b5e', brow:1,   smile:0},
-  dizzy:  {gl:'#ffd45e', brow:0,   smile:0},
-  bored:  {gl:'#8fa6bb', brow:.15, smile:0},
-  sad:    {gl:'#7f8fe0', brow:.5,  smile:0}
+  happy:  {gl:'#49f0c0',brow:0,  smile:1,pup:'#49f0c0',core:1},
+  smug:   {gl:'#9be36a',brow:.35,smile:1,pup:'#9be36a',core:1},
+  thinking:{gl:'#6fc3ff',brow:.2, smile:0,pup:'#6fc3ff',core:.6},
+  angry:  {gl:'#ff6b5e',brow:1,  smile:0,pup:'#ff6b5e',core:1.4},
+  dizzy:  {gl:'#ffd45e',brow:0,  smile:0,pup:'#ffd45e',core:.8},
+  bored:  {gl:'#8fa6bb',brow:.15,smile:0,pup:'#8fa6bb',core:.5},
+  sad:    {gl:'#7f8fe0',brow:.5, smile:0,pup:'#7f8fe0',core:.4},
+  excited:{gl:'#ff6b9d',brow:0,  smile:1,pup:'#ff6b9d',core:1.6},
+  confused:{gl:'#c4b5ff',brow:.3, smile:0,pup:'#c4b5ff',core:.7},
+  mischievous:{gl:'#ff8f50',brow:.2,smile:.5,pup:'#ff8f50',core:1.2},
+  tired:{gl:'#a0a0a0',brow:.1, smile:0,pup:'#a0a0a0',core:.3}
 };
-let mood='happy';
+let mood='happy',_targetGl='#49f0c0';
 function setMood(m){
   const c=MOOD[m]||MOOD.happy; mood=m;
-  document.documentElement.style.setProperty('--gl',c.gl);
+  _targetGl=c.gl;
+  // smooth color transition (interpolated over ~300ms)
+  const t=document.documentElement.style;
+  t.setProperty('--gl-to',c.gl);
+  t.setProperty('--gl',c.gl);
   brows.style.opacity=c.brow;
   smile.style.opacity=c.smile;
+  // pupil color per mood
+  pups.forEach(p=>p.setAttribute('fill',c.pup));
   tag.style.background=c.gl;
+  // core pulse intensity per mood
+  _corePulse=c.core;
 }
 setMood('happy');
 
@@ -230,6 +244,11 @@ function send(m){
     body:JSON.stringify(m)}).catch(()=>{});
 }
 
+// ---------- cursor tracking (for eye/head following) ----------
+addEventListener('mousemove',e=>{
+  e_mouseX=e.clientX; e_mouseY=e.clientY;
+});
+
 // ---------- stage awareness ----------
 let zones=[],cw=1920,ch=1080;
 async function stage(){try{
@@ -263,14 +282,31 @@ lids.forEach(l=>l.style.transformOrigin='center');
 setTimeout(blink,900);
 
 // ---------- speech / lip-sync ----------
-let speaking=false,mouthT=0,talkUntil=0;
+// viseme shapes: A(open), E(mid), I(small), O(round), U(neutral)
+// driven by amplitude envelope. face_state.json can supply explicit
+// visemes as a string (e.g. "AAIEOU") for precise sync from speech engine.
+let speaking=false,mouthT=0,talkUntil=0,visemes="";
+const VISAME_DURATION=160; let viseme_pos=0,viseme_t=0,_corePulse=1;
+const MOUTH_OPEN=[2,5,8,11,9,6]; // A,E,I,O,U,close -> ry values
 function lipsync(dt){
   if(speaking||performance.now()<talkUntil){
-    mouthT+=dt*0.019;
-    const open=3+Math.abs(Math.sin(mouthT))*11+Math.sin(mouthT*2.7)*3;
-    mouth.setAttribute('ry',Math.max(2,open).toFixed(1));
-    mouth.setAttribute('rx',(13+Math.sin(mouthT*1.3)*3).toFixed(1));
+    if(visemes){
+      viseme_t+=dt;
+      while(viseme_t>=VISAME_DURATION && viseme_pos<visemes.length-1){
+        viseme_pos++; viseme_t-=VISAME_DURATION;
+      }
+      const idx="AEIOU".indexOf(visemes[viseme_pos]||'A');
+      const ry=MOUTH_OPEN[idx>=0?idx:5];
+      mouth.setAttribute('ry',ry);
+      mouth.setAttribute('rx',13);
+    }else{
+      mouthT+=dt*0.019;
+      const open=3+Math.abs(Math.sin(mouthT))*11+Math.sin(mouthT*2.7)*3;
+      mouth.setAttribute('ry',Math.max(2,open).toFixed(1));
+      mouth.setAttribute('rx',(13+Math.sin(mouthT*1.3)*3).toFixed(1));
+    }
   }else{
+    viseme_pos=0;viseme_t=0;
     const ry=+mouth.getAttribute('ry');
     mouth.setAttribute('ry',Math.max(3,ry*0.82).toFixed(1));
   }
@@ -294,6 +330,8 @@ function frame(now){
     avoid();
     if(Math.abs(vel.x)<.2&&Math.abs(vel.y)<.2){
       idle+=.021;pos.y+=Math.sin(idle)*.34;
+      // subtle eye drift when idle (looks around)
+      _idle_px=Math.sin(idle*.3)*2; _idle_py=Math.cos(idle*.2)*1;
       if(Math.random()<.0016){vel.x=(Math.random()-.5)*10;vel.y=-5-Math.random()*4;}
     }else idle=0;
   }
@@ -308,11 +346,19 @@ function frame(now){
 
   // head lags the body -> feels alive
   headLag+=((-lean*0.55)-headLag)*0.12;
+  // head turns toward cursor when idle (subtle interest)
+  const headDist=Math.hypot(pos.x+115-e_mouseX, pos.y+90-e_mouseY);
+  if(!grabbed && idle>0 && headDist<innerWidth*.4){
+    headLag+=(((e_mouseX||innerWidth/2)-(pos.x+115))*0.002-headLag)*0.12;
+  }
   head.setAttribute('transform',
     `rotate(${headLag.toFixed(2)} 115 90) translate(0 ${(Math.sin(idle*1.3)*1.6).toFixed(2)})`);
 
-  // eyes track motion (look where you're going)
-  const px=Math.max(-6,Math.min(6,vel.x*.9)), py=Math.max(-5,Math.min(5,vel.y*.6));
+  // eyes track motion + cursor (look where you're going / what's grabbed)
+  const mx=(e_mouseX||innerWidth/2)-pos.x-115;
+  const my=(e_mouseY||innerHeight/2)-pos.y-90;
+  const px=Math.max(-6,Math.min(6,vel.x*.9+mx*0.01+_idle_px));
+  const py=Math.max(-5,Math.min(5,vel.y*.6+my*0.01+_idle_py));
   pups.forEach((p,i)=>{p.setAttribute('cx',(i?138:92)+px);p.setAttribute('cy',80+py);});
   shines.forEach((s,i)=>{s.setAttribute('cx',(i?134:88)+px*.8);s.setAttribute('cy',75+py*.8);});
 
@@ -332,8 +378,8 @@ function frame(now){
   const tdy=Math.max(-16,Math.min(28,(tailLag.y-pos.y)*1.1));
   tail.setAttribute('d',`M115 210 Q ${150+tdx} ${226+tdy} ${168+tdx*1.5} ${250+tdy}`);
 
-  // core pulse
-  core.setAttribute('r',(15+Math.sin(now*.004)*1.9+(speaking?2.4:0)).toFixed(2));
+  // core pulse (intensity varies per mood)
+  core.setAttribute('r',(15+Math.sin(now*.004)*1.9*_corePulse+(speaking?2.4:0)).toFixed(2));
   shadow.setAttribute('rx',(54*st).toFixed(1));
   shadow.setAttribute('opacity',(0.34*(1-Math.min(.6,(innerHeight-150-pos.y)/700))).toFixed(2));
 
@@ -364,11 +410,14 @@ async function poll(){
             talkUntil=performance.now()+Math.min(9000,1100+t.length*52);}
       else bub.classList.remove('on');
     }
-    const h=(s.heard||'').trim();
     if(h!==lastHeard){
       lastHeard=h;
       if(h){hrd.textContent='“'+h+'”';hrd.classList.add('on');}
       else hrd.classList.remove('on');
+    }
+    // --- viseme string for precise lip-sync (from speech engine) ---
+    if(s.visemes && s.visemes!==visemes){
+      visemes=s.visemes; viseme_pos=0; viseme_t=0;
     }
     // --- cohost vital signs (transparency: let the stream see it think) ---
     if(s.status && statEl){
