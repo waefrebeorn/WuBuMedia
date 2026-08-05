@@ -236,9 +236,21 @@ class Persona:
                          f"You're keeping score.")
         return "\n".join(parts)
 
-    def reply_to(self, heard, screen="", lessons="", context="", chat=None):
-        return [{"role": "system", "content": self.system(screen, lessons,
-                 context, chat)},
+    def reply_to(self, heard, screen="", lessons="", context="", chat=None,
+                 voice_emotion=None):
+        """Build the prompt for a reply. voice_emotion is detected prosody.
+
+        When voice_emotion is provided (from wubu_ears prosodic analysis),
+        the persona mirrors the streamer's emotional tone — matching energy,
+        not just reacting to words. This is the difference between a chatbot
+        and a real cohost that vibes with the stream.
+        """
+        sys_prompt = self.system(screen, lessons, context, chat)
+        if voice_emotion and voice_emotion in MOODS:
+            sys_prompt += (f"\\nThe streamer's voice sounds {voice_emotion} right now. "
+                           f"Match that energy in your reply — be {voice_emotion}, "
+                           f"not just reactive to the words.\\n")
+        return [{"role": "system", "content": sys_prompt},
                 {"role": "user", "content": heard}]
 
     def react_to_touch(self, kind, power=1):

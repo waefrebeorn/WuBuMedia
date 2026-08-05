@@ -45,6 +45,84 @@ MAX_UTTERANCE = 15.0       # hard cap so a monologue still flushes
 CALIB_SECS = 1.5           # measure room noise, then gate above it
 MODEL_SIZE = os.environ.get("WUBU_STT_MODEL") or "base.en"
 
+# Prosodic feature extraction for emotion detection.
+# Research: pitch, energy, and speech rate are the three pillars of
+# real-time emotion recognition (see Inworld, Forosoft SER papers).
+# We use lightweight numpy-based proxies (no librosa) since the resource
+# guard forbids heavy CPU work during streaming.
+PROSODY_SAMPLES = 8  # number of recent blocks to analyze for pitch/energy trend
+
+
+def extract_prosody(block, sr=SR):
+    """Extract lightweight prosodic features from a 100ms audio block.
+
+    Returns dict with: rms (energy), zcr (pitch proxy), pitch_hz,
+    energy_std (energy variability). All computed with numpy only.
+    """
+    import numpy as np
+    mono = block.reshape(-1)
+    if len(mono) == 0:
+        return {"rms": 0.0, "zcr": 0.0, "pitch_hz": 0.0, "energy_std": 0.0}
+    rms = float(np.sqrt(np.mean(mono ** 2)))
+    # Zero-crossing rate as pitch proxy: higher ZCR = higher pitch = tension
+    zc = np.diff(np.sign(mono))
+    zcr = float(np.sum(zc != 0) / len(mono)) * sr / 2
+    # Energy variability within the block (jitter/shimmer proxy)
+    frame_size = min(640, len(mono))  # 40ms frames
+    n_frames = len(mono) // frame_size
+    if n_frames >= 2:
+        energies = [float(np.sqrt(np.mean(mono[i*frame_size:(i+1)*frame_size] ** 2)))
+                    for i in range(n_frames)]
+        energy_std = float(np.std(energies))
+    else:
+        energy_std = 0.0
+    return {
+        "rms": rms,
+        "zcr": zcr,
+        "pitch_hz": zcr,  # ZCR is a rough pitch estimate for voiced speech
+        "energy_std": energy_std,
+    }
+
+
+def detect_emotion(prosody_history):
+    """Classify emotion from a history of prosodic features.
+
+    Uses the research-backed mappings:
+    - High pitch (ZCR) + high energy + high variability = excited/happy
+    - Low pitch + low energy + low variability = sad/bored
+    - High pitch + high energy variability = angry/stressed
+    - Low pitch + high energy = calm/focused
+
+    Returns mood string: 'happy', 'excited', 'angry', 'sad', 'thinking', or None.
+    """
+    if not prosody_history or len(prosody_history) < 3:
+        return None
+    import numpy as np
+    recent = prosody_history[-PROSODY_SAMPLES:]
+    avg_rms = float(np.mean([p["rms"] for p in recent]))
+    avg_zcr = float(np.mean([p["zcr"] for p in recent]))
+    std_rms = float(np.std([p["rms"] for p in recent]))
+    std_zcr = float(np.std([p["zcr"] for p in recent]))
+
+    # ZCR for voiced speech: normal ~50-150 Hz, high pitch ~300+ Hz
+    high_pitch = avg_zcr > 0.15  # relative to 16kHz sample rate
+    low_pitch = avg_zcr < 0.06
+    high_energy = avg_rms > 0.02
+    low_energy = avg_rms < 0.008
+    high_var = std_rms > 0.008 or std_zcr > 0.05
+
+    if high_pitch and high_energy:
+        return "excited"
+    if high_pitch and high_var:
+        return "angry"
+    if low_pitch and low_energy:
+        return "sad"
+    if high_energy and low_var and not high_pitch:
+        return "thinking"
+    if not high_pitch and not low_pitch and avg_rms > 0.01:
+        return "happy"
+    return None
+
 
 def find_device(prefer=("voicemeeter out b1", "voicemeeter out b2",
                         "nvidia broadcast", "ag06")):
@@ -108,6 +186,9 @@ class Ears(threading.Thread):
         self.noise_floor = 0.0
         self._model = None
         self._device_check_interval = 5.0  # re-probe device every 5s if lost
+        # Real-time prosody tracking for emotion-aware reactions
+        self.prosody_history = []  # rolling window of prosodic features
+        self.detected_emotion = None  # last detected emotion from voice
 
     # -- speech-to-text ----------------------------------------------------
     def _load_model(self):
@@ -195,6 +276,15 @@ class Ears(threading.Thread):
                             mono = block.reshape(-1)
                             rms = float(np.sqrt(np.mean(mono ** 2)))
                             now = time.time()
+                            # Extract prosodic features for emotion detection
+                            if rms >= self.gate * 0.5:  # track during near-speech
+                                prosody = extract_prosody(block)
+                                self.prosody_history.append(prosody)
+                                if len(self.prosody_history) > PROSODY_SAMPLES * 2:
+                                    self.prosody_history.pop(0)
+                                detected = detect_emotion(self.prosody_history)
+                                if detected:
+                                    self.detected_emotion = detected
                             if rms >= self.gate:
                                 if not speaking:
                                     speaking, started = True, now

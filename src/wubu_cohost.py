@@ -235,7 +235,7 @@ class Cohost:
         return True
 
     # -- ears callback (runs on the audio thread: just enqueue) -----------
-    def on_heard(self, text):
+    def on_heard(self, text, emotion=None):
         if len(text.strip()) < 3:
             return
         # Private speech is dropped at the door -- it never enters the queue,
@@ -243,7 +243,8 @@ class Cohost:
         if wubu_safety.is_private(text):
             print(f"[private -- ignored] {text[:70]}...", flush=True)
             return
-        self.utterances.put(text)
+        # Use voice-detected emotion as a mood hint if no explicit mood given
+        self.utterances.put((text, emotion or self.ears.detected_emotion))
         push_face(listening=True, heard=text[:120])
 
     # -- eyes -------------------------------------------------------------
@@ -262,12 +263,12 @@ class Cohost:
         return self.screen
 
     # -- reply ------------------------------------------------------------
-    def respond_to(self, heard):
+    def respond_to(self, heard, voice_mood=None):
         seen = self.look()
         self.reflector.touch()
         msgs = self.persona.reply_to(heard, seen,
                                      self.memory.lesson_block(),
-                                     CONTEXT_BLOCK)
+                                     CONTEXT_BLOCK, voice_emotion=voice_mood)
         reply = self.brain.think(msgs, max_tokens=70)
         if not reply:
             return
@@ -280,8 +281,18 @@ class Cohost:
         self.history.append({"role": "user", "content": heard})
         self.history.append({"role": "assistant", "content": safe})
         self.memory.record(heard, safe)
+        # Mood is a composite: voice-detected emotion (if any), persona mood,
+        # and context (thinking -> bored, error -> angry, etc.)
+        mood = self.persona.settle()
+        low = (reply or "").lower()
+        if voice_mood:
+            mood = voice_mood  # voice emotion overrides for this response
+        elif "error" in low or "fail" in low:
+            mood = "angry"
+        elif not safe:
+            mood = "thinking"
         allowed, state = L.guard_allows_voice()
-        say(safe, mood=self.persona.settle(), speak=self.speak and allowed)
+        say(safe, mood=mood, speak=self.speak and allowed)
         print(f"  ({self.brain.tier} {self.brain.last_ms}ms)", flush=True)
 
     # -- ambient ----------------------------------------------------------
@@ -371,15 +382,24 @@ class Cohost:
                 last_stage = time.time()
 
             if heard:
+                # heard is now (text, detected_emotion) tuple
+                if isinstance(heard, tuple):
+                    text_str, vem = heard
+                else:
+                    text_str, vem = heard, None
                 # drain: if the boss kept talking, use the fullest thought
                 extra = []
                 while not self.utterances.empty():
-                    extra.append(self.utterances.get_nowait())
+                    item = self.utterances.get_nowait()
+                    if isinstance(item, tuple):
+                        extra.append(item[0])
+                    else:
+                        extra.append(item)
                 if extra:
-                    heard = " ".join([heard] + extra)
-                print(f"[boss] {heard}", flush=True)
+                    text_str = " ".join([text_str] + extra)
+                print(f"[boss] {text_str}", flush=True)
                 push_face(listening=False)
-                self.respond_to(heard)
+                self.respond_to(text_str, voice_mood=vem)
                 self.last_narrate = time.time()
                 push_face(listening=True)
                 continue
