@@ -36,6 +36,15 @@ FACE_SOURCE = os.environ.get("WUBU_FACE_SOURCE") or "WuBuFace"
 FACE_URL = os.environ.get("WUBU_FACE_URL") or "http://127.0.0.1:8137/index.html"
 FACE_DIR = os.environ.get("WUBU_FACE_DIR") or os.path.join(ROOT, "face")
 
+# Names of capture-device sources to optimize (PS5 capture card, webcam, etc.)
+# The boss streams from PS5 via a USB 3.0 HDMI capture card; its generic UVC
+# driver buffers heavily. We push low-latency settings via obs-websocket.
+CAPTURE_PREFIXES = ("capture", "ps5", "hdmi", "elgato", "avermedia",
+                    "magewell", "webcam", "camera", "video in")
+# Set to True to apply YUY2 + no-buffering on matching capture sources.
+# YUY2 has minimal latency per OBS docs; MJPEG adds encode/decode latency.
+OPTIMIZE_CAPTURE = os.environ.get("WUBU_OPTIMIZE_CAPTURE", "1") != "0"
+
 # Sources the buddy must never sit on top of (substring match, case-insensitive).
 PROTECT = ("chat", "alert", "cam", "phone", "shop", "discord", "vertical",
            "starting soon")
@@ -66,6 +75,41 @@ def current_scene(obs):
         return ""
 
 
+def is_capture_source(name):
+    """True if this source name looks like a capture device."""
+    n = (name or "").lower()
+    return any(p in n for p in CAPTURE_PREFIXES)
+
+
+def optimize_capture_source(obs, scene, item):
+    """Push low-latency settings onto a VideoCaptureDevice source.
+
+    YUY2 format + disabled buffering minimizes the inherent UVC driver lag.
+    The boss's generic USB 3.0 HDMI capture card buffers aggressively by
+    default; this cuts 100-200ms of pipeline delay. Returns True if
+    settings were changed.
+    """
+    if not OPTIMIZE_CAPTURE or not obs:
+        return False
+    name = item.get("sourceName", "")
+    if not is_capture_source(name):
+        return False
+    try:
+        obs._call("SetInputSettings", inputName=name,
+                  inputSettings={
+                      "buffering": False,           # kill the UVC buffer delay
+                      "videoFormat": "7",           # YUY2 (OBS FOURCC 'YUY2')
+                      "deactivate_when_not_showing": True,  # free HW when off-scene
+                  },
+                  overlay=True)
+        # force a re-enumerate so the new format sticks
+        obs._call("SetInputRender", inputName=name,
+                  enabled=True, render=True)
+        return True
+    except Exception:
+        return False
+
+
 def scene_items(obs, scene):
     try:
         return obs._call("GetSceneItemList", sceneName=scene).get("sceneItems", [])
@@ -75,6 +119,9 @@ def scene_items(obs, scene):
 
 def go_fullscreen(obs, scene=None):
     """Make the face source the whole canvas at native res.
+
+    Also auto-optimizes any capture-device sources (PS5 card, webcam) for
+    low latency: YUY2 format + buffering off.
 
     Returns (ok, note). Idempotent -- safe to call every start-up.
     """
@@ -103,6 +150,9 @@ def go_fullscreen(obs, scene=None):
             if it.get("sourceName") == FACE_SOURCE:
                 item_id = it.get("sceneItemId")
                 break
+            # auto-optimize capture devices for low latency
+            if OPTIMIZE_CAPTURE:
+                optimize_capture_source(obs, scene, it)
         if item_id is None:
             return False, f"{FACE_SOURCE} not in scene {scene}"
         obs._call("SetSceneItemTransform", sceneName=scene, sceneItemId=item_id,
@@ -162,6 +212,13 @@ def export_layout(obs, scene=None):
                       "y": int(t.get("positionY") or 0),
                       "w": w, "h": h})
     data = {"scene": scene, "canvas": {"w": W, "h": H}, "zones": zones}
+    # Report capture source names so the overlay can adapt (e.g., avoid
+    # overlaying the boss's face on the game capture feed).
+    data["capture_sources"] = [
+        str(it.get("sourceName") or "")
+        for it in scene_items(obs, scene)
+        if is_capture_source(str(it.get("sourceName") or ""))
+    ]
     try:
         os.makedirs(FACE_DIR, exist_ok=True)
         path = os.path.join(FACE_DIR, "stage.json")
@@ -182,6 +239,13 @@ if __name__ == "__main__":
     print("scene:", sc, "canvas:", canvas(o))
     ok, note = go_fullscreen(o, sc)
     print("fullscreen:", ok, note)
+    # report any capture sources found
+    items = scene_items(o, sc)
+    caps = [it.get("sourceName") for it in items if is_capture_source(it.get("sourceName",""))]
+    if caps:
+        print("capture sources:", caps)
+        for cap in caps:
+            print(f"  {cap} -> optimized" if optimize_capture_source(o, sc, {"sourceName": cap}) else f"  {cap} -> n/a")
     d = export_layout(o, sc)
     print(f"no-go zones ({len(d.get('zones', []))}):")
     for z in d.get("zones", []):

@@ -90,7 +90,7 @@ class FaceHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         """Serve static files + JSON state + health endpoint."""
         self._no_cache = self.path.endswith(".json")
-        self._gzip = False
+        self._gzip = False  # only set True when we actually gzip
 
         # /health — lightweight health check for OBS/guard monitoring
         if self.path == "/health":
@@ -98,8 +98,10 @@ class FaceHandler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
-            state = {"status": "ok", "uptime": time.time() - _START_TIME}
-            # Merge in face state fields if available
+            state = {"ok": True, "uptime": time.time() - _START_TIME}
+            # Merge in face state fields if available (but don't
+            # clobber 'ok' — face_state may have a 'status' key from
+            # wubu_cohost._publish_status()).
             fp = os.path.join(FACE_DIR, "face_state.json")
             try:
                 with open(fp) as f:
@@ -109,22 +111,22 @@ class FaceHandler(SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(state).encode())
             return
 
-        # Check for gzip support
+        # Only gzip if the client explicitly accepts it
         accept = self.headers.get("Accept-Encoding", "")
-        if "gzip" in accept:
-            self._gzip = True
+        wants_gzip = "gzip" in accept
 
-        # Let the parent serve the file, then wrap with gzip if needed
+        # Try gzip path for compressible text assets
         path = self.translate_path(self.path)
-        if path and os.path.isfile(path):
-            # Check if we should gzip this file
+        if path and os.path.isfile(path) and wants_gzip:
             ext = os.path.splitext(path)[1].lower()
             if ext in (".html", ".js", ".css", ".json", ".svg"):
                 try:
-                    raw = open(path, "rb").read()
-                    if len(raw) > 200:  # only compress worthwhile files
+                    with open(path, "rb") as f:
+                        raw = f.read()
+                    if len(raw) > 200:
                         compressed = gzip.compress(raw, compresslevel=6)
-                        if len(compressed) < len(raw) * 0.9:
+                        if len(compressed) < len(raw) * 0.85:  # 15% savings worth it
+                            self._gzip = True
                             self.send_response(200)
                             ct = MIME.get(ext, ("application/octet-stream", True))[0]
                             self.send_header("Content-Type", ct)
@@ -134,7 +136,7 @@ class FaceHandler(SimpleHTTPRequestHandler):
                             return
                 except Exception:
                     pass  # fall through to normal serving
-        # Default: let parent handle
+        # Default: let parent handle (no gzip, but still no-cache if JSON)
         return super().do_GET()
 
     def do_POST(self):
