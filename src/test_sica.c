@@ -67,14 +67,11 @@ int main(void) {
         FAIL("rc=%d, out='%s'", rc, out);
     }
 
-    /* ---- Test 5: Git commit (dry run - just verify function works) ---- */
+    /* ---- Test 5: Git commit helper (safe path check) ---- */
     TEST("git commit helper");
-    /* We won't actually commit, just verify the function signature works */
-    /* Skip actual commit to avoid messing up repo */
-    rc = wubu_sica_git_commit(cwd, "[SICA test] skip");
-    /* Commit may fail (nothing to commit) which is fine */
-    if (rc >= 0 || rc == 1) { PASS(); }  /* any return is OK */
-    else { FAIL("commit helper failed: %d", rc); }
+    rc = wubu_sica_git_has_changes(cwd);  /* just verify function exists and runs */
+    if (rc >= 0) { PASS(); }
+    else { FAIL("git_has_changes failed: %d", rc); }
 
     /* ---- Test 6: Cycle count ---- */
     TEST("cycle count");
@@ -83,11 +80,27 @@ int main(void) {
 
     /* ---- Test 7: Git helpers (commit/rollback) ---- */
     TEST("git commit + rollback helpers");
-    /* Test rollback (this would discard any uncommitted changes -
-     * in test we just verify the function doesn't crash) */
-    int rollback_rc = wubu_sica_git_rollback(cwd);
-    if (rollback_rc >= 0) { PASS(); }
-    else { FAIL("rollback failed: %d", rollback_rc); }
+    /* Use a temp dir for git ops to avoid affecting the real repo */
+    {
+        char tmptest[512];
+        snprintf(tmptest, sizeof(tmptest), "%s/sica_gtest_XXXXXX",
+                 getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+        char *tmpdir = mkdtemp(tmptest);
+        if (tmpdir) {
+            wubu_sica_run_isolated(
+                "git init && git config user.email t@t.com && git config user.name test && "
+                "echo hello > t.txt && git add -A && git commit -m initial 2>&1",
+                tmpdir, NULL, 0);
+            int rollback_rc = wubu_sica_git_rollback(tmpdir);
+            wubu_sica_run_isolated("echo world >> t.txt", tmpdir, NULL, 0);
+            int commit_rc = wubu_sica_git_commit(tmpdir, "[SICA test] auto-commit");
+            if (rollback_rc >= 0 && commit_rc >= 0) { PASS(); }
+            else { FAIL("rollback=%d commit=%d", rollback_rc, commit_rc); }
+            wubu_sica_run_isolated("rm -rf t.txt .git", tmpdir, NULL, 0);
+        } else {
+            FAIL("could not create temp dir");
+        }
+    }
 
     /* ---- Test 8: Sica config is accessible via cycle run ---- */
     TEST("sica stop + cycle count (0)");

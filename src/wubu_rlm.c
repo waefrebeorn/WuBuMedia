@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <math.h>
 
 /* ---------- Opaque struct ---------- */
 struct RLMImpl {
@@ -73,6 +74,14 @@ static const char *RLM_SCHEMA =
     "    energy REAL,"
     "    rumination REAL,"
     "    last_update REAL"
+    ");"
+    "CREATE TABLE IF NOT EXISTS personality ("
+    "    id INTEGER PRIMARY KEY,"
+    "    openness REAL,"
+    "    conscientiousness REAL,"
+    "    extraversion REAL,"
+    "    agreeableness REAL,"
+    "    neuroticism REAL"
     ");"
     /* FTS5 trigger to keep summaries_fts in sync */
     "CREATE TRIGGER IF NOT EXISTS summaries_ai AFTER INSERT ON summaries BEGIN"
@@ -244,6 +253,21 @@ RLM *wubu_rlm_open(const char *db_path, const char *context_slug) {
             rlm->mood.rumination = sqlite3_column_double(stmt, 4);
             rlm->mood.last_update = sqlite3_column_double(stmt, 5);
             rlm->last_mood_update = rlm->mood.last_update;
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    /* Try to load persisted personality */
+    rc = sqlite3_prepare_v2(rlm->db,
+        "SELECT openness, conscientiousness, extraversion, agreeableness, neuroticism "
+        "FROM personality WHERE id=1", -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            rlm->personality.openness = sqlite3_column_double(stmt, 0);
+            rlm->personality.conscientiousness = sqlite3_column_double(stmt, 1);
+            rlm->personality.extraversion = sqlite3_column_double(stmt, 2);
+            rlm->personality.agreeableness = sqlite3_column_double(stmt, 3);
+            rlm->personality.neuroticism = sqlite3_column_double(stmt, 4);
         }
         sqlite3_finalize(stmt);
     }
@@ -594,6 +618,126 @@ void wubu_rlm_stats(RLM *rlm, RLMStats *out) {
 
     out->context = rlm->context_slug;
     out->db_path = rlm->db_path;
+
+    /* Include current mood state */
+    out->current_mood = rlm->mood;
+}
+
+/* ---------- Personality ---------- */
+void wubu_rlm_set_personality(RLM *rlm, const RLMPersonality *p) {
+    if (!rlm || !p) return;
+    rlm->personality = *p;
+    /* Persist to DB */
+    if (rlm->db) {
+        char *err = NULL;
+        char sql[512];
+        snprintf(sql, sizeof(sql),
+            "INSERT OR REPLACE INTO personality "
+            "(id, openness, conscientiousness, extraversion, agreeableness, neuroticism) "
+            "VALUES (1, %.6f, %.6f, %.6f, %.6f, %.6f)",
+            p->openness, p->conscientiousness, p->extraversion,
+            p->agreeableness, p->neuroticism);
+        sqlite3_exec(rlm->db, sql, NULL, NULL, &err);
+        sqlite3_free(err);
+    }
+}
+
+void wubu_rlm_get_personality(RLM *rlm, RLMPersonality *out) {
+    if (!rlm || !out) return;
+    *out = rlm->personality;
+}
+
+/* ---------- Mood decay (OpenFeelz exponential model) ---------- */
+/*
+ * Mood decays exponentially toward a neutral baseline (0.5).
+ * Personality traits modulate the decay rate:
+ *   - High neuroticism slows decay (emotions linger)
+ *   - High extraversion speeds recovery
+ * Based on OpenFeelz half-life model:
+ *   Joy: ~57 min, Sadness: ~2.4 hours, Anger: ~1.6 hours
+ */
+double wubu_rlm_decay_mood(RLM *rlm, const RLMMood *mood, double elapsed_seconds) {
+    if (!rlm || !mood || elapsed_seconds < 0) {
+        return mood ? mood->mood : 0.5;
+    }
+
+    /* Baseline mood influenced by personality */
+    double baseline = 0.5 + (rlm->personality.extraversion - 0.5) * 0.3;
+    /* Neuroticism slows decay (emotions linger) */
+    double neuro_mod = 0.5 + rlm->personality.neuroticism * 0.5;
+
+    double decay_rate = WUBU_RLM_DECAY_JOY * neuro_mod;
+    double delta = mood->mood - baseline;
+    double decayed = delta * exp(-decay_rate * elapsed_seconds);
+    return baseline + decayed;
+}
+
+/* ---------- Mood update (with rumination) ---------- */
+double wubu_rlm_update_mood(RLM *rlm, RLMMood *mood, double valence, double arousal) {
+    if (!rlm || !mood) return -1.0;
+
+    double now = (double)time(NULL);
+    double elapsed = now - rlm->last_mood_update;
+    if (elapsed < 0) elapsed = 0;
+
+    /* Apply decay from last update */
+    double decayed_mood = wubu_rlm_decay_mood(rlm, mood, elapsed);
+
+    double intensity = 1.0;
+    if (fabs(valence) > WUBU_RLM_RUMINATION_THRESH) {
+        intensity = 1.5;
+        mood->rumination = fmin(1.0, mood->rumination + 0.1);
+    } else {
+        mood->rumination *= 0.95;
+    }
+
+    double rumination_boost = mood->rumination * 0.3 * intensity;
+    double new_mood = decayed_mood * 0.5 + (valence + 1.0) / 2.0 * 0.5 + rumination_boost;
+    new_mood = fmax(0.0, fmin(1.0, new_mood));
+
+    mood->arousal = fmax(0.0, fmin(1.0, mood->arousal * 0.7 + arousal * 0.3));
+    mood->energy = fmax(0.0, fmin(1.0, mood->energy * 0.8 + mood->arousal * 0.2));
+    mood->mood = new_mood;
+    mood->valence = valence;
+    mood->last_update = now;
+    rlm->last_mood_update = now;
+    rlm->mood = *mood;
+
+    return new_mood;
+}
+
+/* ---------- Mood classification ---------- */
+RLMMoodClass wubu_rlm_classify_mood(const RLMMood *mood) {
+    if (!mood) return Mood_Neutral;
+
+    double v = mood->valence;
+    double e = mood->energy;
+    double m = mood->mood;
+
+    if (v < -0.5 && m < 0.3) return Mood_Angry;
+    if (v < -0.2 && m < 0.4) return Mood_Sad;
+    if (v > 0.5 && e > 0.7 && m > 0.7) return Mood_Ecstastic;
+    if (v > 0.3 && e > 0.5 && m > 0.6) return Mood_VeryHappy;
+    if (v > 0.2 && e > 0.4 && m > 0.5) return Mood_Excited;
+    if (v > 0.0 && m > 0.4) return Mood_Happy;
+    if (m > 0.3 && m < 0.5) return Mood_Thinking;
+    if (e < 0.3 && m < 0.3) return Mood_Tired;
+    return Mood_Neutral;
+}
+
+const char *wubu_rlm_mood_name(RLMMoodClass mc) {
+    switch (mc) {
+        case Mood_Sad:       return "sad";
+        case Mood_Neutral:   return "neutral";
+        case Mood_Happy:     return "happy";
+        case Mood_Excited:   return "excited";
+        case Mood_VeryHappy: return "very_happy";
+        case Mood_Ecstastic: return "ecstatic";
+        case Mood_Angry:     return "angry";
+        case Mood_Thinking:  return "thinking";
+        case Mood_Tired:     return "tired";
+        default:             return "neutral";
+    }
 }
 
 /* ---------- Cleanup ---------- */

@@ -230,6 +230,27 @@ Advanced workflows chain multiple phases:
 - Replace `wubu_self_check` with the SICA 5-stage loop
 - Add `knowledge/self_learn.md` AGENTS.md equivalent
 - Add compound loop: analysis → planning → execution
+- Add **15-minute timer** with container isolation and git rollback
+- Add `wubu_sica.c` module implementing the full loop
+
+### Timer Architecture (15-Minute Interval)
+
+The SICA loop runs on a 15-minute timer with these properties:
+
+1. **Scheduler thread**: `wubu_sica_run_scheduler()` uses `pthread_create` (or
+   a background thread) with `sleep(interval_seconds)` where default = 900s.
+2. **Container isolation**: Each cycle runs in a fresh `popen` process —
+   no state leakage between iterations (the "Ralph Wiggum technique").
+3. **Git rollback**: Pre-cycle `git stash` snapshot; post-validation commit or
+   `git reset --hard` rollback if tests regress.
+4. **Research wiring**: Cycle 2+ scans `knowledge/` for new research notes
+   that may inform improvement decisions.
+
+**Implementation**: `src/wubu_sica.c` — 5-stage loop with container isolation,
+git helpers (commit/rollback), and 15-minute timer. All functions are
+opaque-struct + C11 only. Tests in `test_sica.c` (9/9 pass).
+
+See: `knowledge/SICA_RESEARCH.md` for full implementation details.
 
 ### Phase 4: Cross-Loop Integration
 - Wire recs engagement → emotion state

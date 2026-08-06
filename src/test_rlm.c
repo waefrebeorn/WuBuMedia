@@ -147,6 +147,56 @@ int main(void) {
     wubu_rlm_close(rlm);
     remove(dbpath);
 
+    /* ---- Test 10: Personality + mood decay + rumination ---- */
+    TEST("personality + mood decay + rumination");
+    {
+        char dbpath_b[] = "/tmp/test_rlm_mood.db";
+        remove(dbpath_b);
+        RLM *rlm_b = wubu_rlm_open(dbpath_b, "test_mood");
+        if (!rlm_b) { FAIL("could not open rlm_b"); }
+        else {
+            int all_ok = 1;
+
+            /* Set high-neuroticism personality (emotions linger) */
+            RLMPersonality p = {0.7, 0.4, 0.3, 0.6, 0.8};
+            wubu_rlm_set_personality(rlm_b, &p);
+
+            /* Verify personality round-trip */
+            RLMPersonality p2;
+            wubu_rlm_get_personality(rlm_b, &p2);
+            if (!(p2.neuroticism == 0.8 && p2.openness == 0.7)) all_ok = 0;
+
+            /* Test mood update with intense valence (rumination) */
+            RLMMood mood = {0, 0, 0.5, 1.0, 0, 0};
+            double new_mood = wubu_rlm_update_mood(rlm_b, &mood, 0.9, 0.8);
+            if (!(new_mood > 0.6)) all_ok = 0;
+
+            /* Test mood classification */
+            RLMMoodClass mc = wubu_rlm_classify_mood(&mood);
+            const char *name = wubu_rlm_mood_name(mc);
+            printf("  mood classified as: %s\n", name);
+
+            /* Test decay — mood should move toward baseline */
+            double old_mood = mood.mood;
+            double decayed = wubu_rlm_decay_mood(rlm_b, &mood, 3600.0);
+            if (!(decayed != old_mood)) all_ok = 0;
+
+            /* Verify persistence */
+            wubu_rlm_close(rlm_b);
+            RLM *rlm_c = wubu_rlm_open(dbpath_b, "test_mood");
+            if (rlm_c) {
+                RLMPersonality p3;
+                wubu_rlm_get_personality(rlm_c, &p3);
+                if (!(p3.neuroticism == 0.8)) all_ok = 0;
+                wubu_rlm_close(rlm_c);
+            } else {
+                all_ok = 0;
+            }
+            remove(dbpath_b);
+            if (all_ok) PASS(); else FAIL("mood/traits sub-check failed");
+        }
+    }
+
     printf("\n=== Results: %d/%d tests passed ===\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;
 }
