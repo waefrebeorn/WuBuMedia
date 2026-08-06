@@ -19,6 +19,9 @@ struct RLMImpl {
     char    *db_path;
     char    *context_slug;
     size_t   window_size;
+    RLMPersonality personality;  /* OCEAN traits (in-memory, also persisted) */
+    RLMMood    mood;            /* current emotional state */
+    double     last_mood_update; /* epoch seconds of last mood update */
 };
 
 /* ---------- Schema ---------- */
@@ -61,6 +64,16 @@ static const char *RLM_SCHEMA =
     "CREATE INDEX IF NOT EXISTS idx_exchanges_ts ON exchanges(timestamp DESC);"
     "CREATE INDEX IF NOT EXISTS idx_summaries_ctx ON summaries(context_slug);"
     "CREATE INDEX IF NOT EXISTS idx_facts_key ON facts(key);"
+    /* Mood/personality persistence */
+    "CREATE TABLE IF NOT EXISTS mood_state ("
+    "    id INTEGER PRIMARY KEY,"
+    "    valence REAL,"
+    "    arousal REAL,"
+    "    mood REAL,"
+    "    energy REAL,"
+    "    rumination REAL,"
+    "    last_update REAL"
+    ");"
     /* FTS5 trigger to keep summaries_fts in sync */
     "CREATE TRIGGER IF NOT EXISTS summaries_ai AFTER INSERT ON summaries BEGIN"
     "  INSERT INTO summaries_fts(rowid, summary) VALUES (new.id, new.summary);"
@@ -204,12 +217,56 @@ RLM *wubu_rlm_open(const char *db_path, const char *context_slug) {
         sqlite3_finalize(stmt);
     }
 
+    /* Initialize/default mood state */
+    rlm->personality.openness = 0.5;
+    rlm->personality.conscientiousness = 0.5;
+    rlm->personality.extraversion = 0.5;
+    rlm->personality.agreeableness = 0.5;
+    rlm->personality.neuroticism = 0.5;
+    rlm->mood.valence = 0.0;
+    rlm->mood.arousal = 0.3;
+    rlm->mood.mood = 0.5;
+    rlm->mood.energy = 0.3;
+    rlm->mood.rumination = 0.0;
+    rlm->mood.last_update = now;
+    rlm->last_mood_update = now;
+
+    /* Try to load persisted mood */
+    rc = sqlite3_prepare_v2(rlm->db,
+        "SELECT valence, arousal, mood, energy, rumination, last_update "
+        "FROM mood_state WHERE id=1", -1, &stmt, NULL);
+    if (rc == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) {
+            rlm->mood.valence = sqlite3_column_double(stmt, 0);
+            rlm->mood.arousal = sqlite3_column_double(stmt, 1);
+            rlm->mood.mood = sqlite3_column_double(stmt, 2);
+            rlm->mood.energy = sqlite3_column_double(stmt, 3);
+            rlm->mood.rumination = sqlite3_column_double(stmt, 4);
+            rlm->mood.last_update = sqlite3_column_double(stmt, 5);
+            rlm->last_mood_update = rlm->mood.last_update;
+        }
+        sqlite3_finalize(stmt);
+    }
+
     return rlm;
 }
 
 void wubu_rlm_close(RLM *rlm) {
     if (!rlm) return;
-    if (rlm->db) sqlite3_close(rlm->db);
+    /* Persist mood state */
+    if (rlm->db) {
+        char *err = NULL;
+        char sql[512];
+        snprintf(sql, sizeof(sql),
+            "INSERT OR REPLACE INTO mood_state "
+            "(id, valence, arousal, mood, energy, rumination, last_update) "
+            "VALUES (1, %.6f, %.6f, %.6f, %.6f, %.6f, %.6f)",
+            rlm->mood.valence, rlm->mood.arousal, rlm->mood.mood,
+            rlm->mood.energy, rlm->mood.rumination, rlm->mood.last_update);
+        sqlite3_exec(rlm->db, sql, NULL, NULL, &err);
+        sqlite3_free(err);
+        sqlite3_close(rlm->db);
+    }
     free(rlm->db_path);
     free(rlm->context_slug);
     free(rlm);
