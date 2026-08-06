@@ -26,7 +26,12 @@
 
 #ifdef __CUDACC__
 #include <cuda_runtime.h>
+#define _USE_MATH_DEFINES
 #include <math.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #define WARP_SIZE 32
 #define MAX_HIDDEN 512
@@ -198,7 +203,7 @@ int wubu_rvc_launch_mono_kernel(WuBuRVC *rvc,
                                  const float *pcm, int n_samples,
                                  float *waveform, int n_output_frames) {
     if (!rvc || !pcm || !waveform) return WUBU_RVC_ERR_ARGS;
-    if (!rvc->cuda_available) return WUBU_RVC_ERR_NO_CUDA;
+    if (!rvc->cuda_available) return WUBU_RVC_ERR_NOGPU;
 
     int n_frames = n_samples / HOP_SIZE;
     int n_output = n_output_frames * UPSAMPLE_FACTOR;
@@ -220,7 +225,7 @@ int wubu_rvc_launch_mono_kernel(WuBuRVC *rvc,
     );
 
     cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) return WUBU_RVC_ERR_KERNEL;
+    if (err != cudaSuccess) return WUBU_RVC_ERR_CUDA;
 
     cudaDeviceSynchronize();
     return WUBU_RVC_OK;

@@ -96,6 +96,14 @@ echo "  wubuvc.exe        OK"
 $CC $CFLAGS -municode src/wubugui.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rcu.c src/wubu_model_dock.c src/wubu_wubu.c src/wubu_buddy.c src/wubu_rlm.c -I src -lsqlite3 -lm -lgdi32 -lcomctl32 -luser32 -lcomdlg32 -o build/wubugui.exe 2>&1
 echo "  wubugui.exe       OK"
 
+# Monolithic CUDA kernel (requires nvcc)
+if command -v nvcc >/dev/null 2>&1 || [ -x "/c/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc" ]; then
+    echo "=== Compiling CUDA kernels ==="
+    NVCC="/c/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc"
+    $NVCC -arch=sm_75 -rdc=true src/wubu_rvc_mono.cu -o build/wubu_rvc_mono.o 2>&1
+    echo "  wubu_rvc_mono.cu  OK (sm_75)"
+fi
+
 if [ "$1" = "test" ]; then
     echo ""
     echo "=== Building test suites ==="
