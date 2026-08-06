@@ -69,6 +69,14 @@ echo "=== Building executables ==="
 $CC $CFLAGS -DWUBU_DAEMON_MAIN src/wubu_daemon.c src/wubu_wiki.c -lsqlite3 -o build/wubu_daemon.exe 2>&1
 echo "  wubu_daemon.exe   OK"
 
+# WuBuVoice application (real-time voice changer)
+$CC $CFLAGS src/wubuvc.c src/wubu_vc.c src/wubu_rvc.c src/wubu_buddy.c src/wubu_rlm.c -lsqlite3 -lm -o build/wubuvc.exe 2>&1
+echo "  wubuvc.exe        OK"
+
+# WuBuVoice GUI (Win32 GUI app, no console)
+$CC $CFLAGS -municode src/wubugui.c src/wubu_vc.c src/wubu_rvc.c src/wubu_buddy.c src/wubu_rlm.c -lsqlite3 -lm -lgdi32 -lcomctl32 -luser32 -o build/wubugui.exe 2>&1
+echo "  wubugui.exe       OK"
+
 if [ "$1" = "test" ]; then
     echo ""
     echo "=== Building test suites ==="
