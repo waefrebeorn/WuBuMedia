@@ -15,19 +15,8 @@
 #include <math.h>
 
 /* ---- Internal engine state ---- */
-struct WuBuRVC {
-    RVCGraph   graph;
-    wubu_frame_buffer_t workspace;
-    RVCConfig  cfg;
-    int        initialized;
-    int        cuda_available;
-    char       cuda_device_name[256];
-    long       total_inferences;
-    long       cache_hits;
-    double     last_latency_ms;
-    char      *weight_blob;
-    size_t     weight_blob_size;
-};
+/* (struct WuBuRVC is now defined in wubu_rvc.h so that
+ *  wubu_rvc_parity.c can access engine fields directly.) */
 
 /* ---- Frame Buffer ---- */
 
@@ -168,7 +157,7 @@ int wubu_kernel_hifigan(wubu_frame_buffer_t *input,
                          const float *mrf_w,
                          int n_input, int n_output, int hidden_ch) {
     if (!input || !output || !input->ptr || !output->ptr) return WUBU_RVC_ERR_ARGS;
-    (void)upsample_w; (void)upsample_b; (void)mrf_w;
+    (void)upsample_w; (void)upsample_b; (void)mrf_w; (void)hidden_ch;
     const float *in = (const float *)input->ptr;
     float *out = (float *)output->ptr;
     int upsample_factor = (n_input > 0) ? n_output / n_input : 1;
@@ -177,10 +166,18 @@ int wubu_kernel_hifigan(wubu_frame_buffer_t *input,
     int n_mrf = 3;
 
     for (int i = 0; i < n_output; i++) {
-        int src = i / upsample_factor;
+        int src;
+        if (upsample_factor > 1) {
+            src = i / upsample_factor;
+        } else {
+            /* Downsample: map proportionally */
+            int ratio = (n_output / n_input > 0) ? n_output / n_input : 1;
+            src = i / ratio;
+        }
         if (src >= n_input) src = n_input - 1;
+        if (src < 0) src = 0;
 
-        float acc = in[(size_t)src * hidden_ch];
+        float acc = in[src];
 
         /* Leaky ReLU */
         acc = (acc > 0.0f) ? acc : acc * leaky;
@@ -241,14 +238,28 @@ static int rvc_run_pipeline(WuBuRVC *rvc,
     /* Flow coupling */
     wubu_frame_buffer_create(&buf_flow, (size_t)n_frames * hidden,
                               WUBU_BUF_CPU, "flow_out");
-    wubu_kernel_autonorm(&buf_in, NULL, NULL, mel_ch);
-    wubu_kernel_flow_couple(&buf_in, &buf_flow, NULL, NULL, n_frames, hidden);
+    /* Flow coupling — need to project mel → hidden first */
+    wubu_frame_buffer_t buf_proj;
+    wubu_frame_buffer_create(&buf_proj, (size_t)n_frames * hidden,
+                              WUBU_BUF_CPU, "proj");
+    /* Project mel (80-dim) → hidden (512-dim) via zero-pad */
+    {
+        const float *in = (const float *)buf_in.ptr;
+        float *proj = (float *)buf_proj.ptr;
+        int n_in = n_frames * mel_ch;
+        int n_out = n_frames * hidden;
+        for (int i = 0; i < n_out; i++) {
+            proj[i] = (i % hidden < mel_ch) ? in[i % n_in] : 0.0f;
+        }
+    }
+    wubu_kernel_autonorm(&buf_proj, NULL, NULL, hidden);
+    wubu_kernel_flow_couple(&buf_proj, &buf_flow, NULL, NULL, n_frames, hidden);
 
     /* HiFi-GAN generator */
     int n_audio = n_frames * 256;
-    wubu_frame_buffer_create(&buf_gen, n_audio, WUBU_BUF_CPU, "gen_out");
+    wubu_frame_buffer_create(&buf_gen, (size_t)n_audio, WUBU_BUF_CPU, "gen_out");
     wubu_kernel_hifigan(&buf_flow, &buf_gen, NULL, NULL, NULL,
-                         n_frames * mel_ch, n_audio, hidden);
+                         n_frames * hidden, n_audio, hidden);
 
     /* Vocoder */
     wubu_frame_buffer_create(&buf_out, n_audio, WUBU_BUF_CPU, "audio_out");
@@ -260,6 +271,7 @@ static int rvc_run_pipeline(WuBuRVC *rvc,
     wubu_frame_buffer_read(&buf_out, output, n_audio);
 
     wubu_frame_buffer_destroy(&buf_in);
+    wubu_frame_buffer_destroy(&buf_proj);
     wubu_frame_buffer_destroy(&buf_flow);
     wubu_frame_buffer_destroy(&buf_gen);
     wubu_frame_buffer_destroy(&buf_out);
@@ -270,7 +282,7 @@ static int rvc_run_pipeline(WuBuRVC *rvc,
 /* ---- Public API ---- */
 
 WuBuRVC *wubu_rvc_load(const RVCConfig *cfg) {
-    if (!cfg || cfg->model_path[0] == '\0') return NULL;
+    if (!cfg) return NULL;
 
     WuBuRVC *rvc = (WuBuRVC *)calloc(1, sizeof(WuBuRVC));
     if (!rvc) return NULL;
@@ -301,7 +313,10 @@ WuBuRVC *wubu_rvc_load(const RVCConfig *cfg) {
     }
 
     /* Check for model file */
-    FILE *mf = fopen(cfg->model_path, "rb");
+    FILE *mf = NULL;
+    if (cfg->model_path[0] != '\0') {
+        mf = fopen(cfg->model_path, "rb");
+    }
     if (mf) {
         fclose(mf);
         /* In full implementation: load .pth via gguf_reader */
@@ -321,6 +336,12 @@ void wubu_rvc_destroy(WuBuRVC *rvc) {
     if (!rvc) return;
     free(rvc->graph.tensors);
     free(rvc->weight_blob);
+    if (rvc->model) {
+        /* Free as WuBuRVCModel — but we don't have the full type
+         * here, so just free the pointer */
+        free(rvc->model);
+        rvc->model = NULL;
+    }
     wubu_frame_buffer_destroy(&rvc->workspace);
     free(rvc);
 }
@@ -402,9 +423,19 @@ void wubu_rvc_info(const WuBuRVC *rvc, RVCInfo *out) {
     out->cuda_major = 7;
     out->cuda_minor = 5;
     out->vram_total_mb = rvc->cuda_available ? 8192 : 0;
+    out->vram_used_mb = rvc->vram_used_mb;
     out->rvc_version = rvc->graph.version;
     out->total_inferences = rvc->total_inferences;
     out->cache_hits = rvc->cache_hits;
+    out->last_latency_ms = rvc->last_latency_ms;
+    out->loaded = rvc->initialized;
+    out->cuda_active = rvc->cuda_available;
+}
+
+/* Check if a real model file is loaded (not just defaults) */
+int wubu_rvc_is_model_loaded(const WuBuRVC *rvc) {
+    if (!rvc || !rvc->initialized) return 0;
+    return rvc->weight_blob != NULL;
 }
 
 /* CUDA init stub */

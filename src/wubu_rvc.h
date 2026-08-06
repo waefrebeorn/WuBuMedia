@@ -22,7 +22,7 @@
  *       │  (unified CPU/GPU memory with layout abstraction)
  *       ▼
  *   Fused kernels (our design):
- *     • wubu_kernel_autoname()   — ActNorm as inline buffer op
+ *     • wubu_kernel_auto norm()   — ActNorm as inline buffer op
  *     • wubu_kernel_flow_couple() — Affine Coupling fused into 1 pass
  *     • wubu_kernel_hifigan()    — Upsample + MRF + LRELU fused
  *     • wubu_kernel_vocoder()    — Residual stack + tanh fused
@@ -35,6 +35,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+/* Forward declare WuBuRVCModel (full def in wubu_rvc_parity.h) */
+struct WuBuRVCModel;
 
 #ifdef __cplusplus
 extern "C" {
@@ -88,36 +91,11 @@ int wubu_frame_buffer_write(wubu_frame_buffer_t *fb,
 int wubu_frame_buffer_read(const wubu_frame_buffer_t *fb,
                             float *dst, size_t n_floats);
 
-/* ---- RVC Model IR (Intermediate Representation) ---- */
-/* After loading a .pth, we build a graph that maps tensor names
- * to our own execution order. This is what makes us "not stuck
- * by old standards" — we reinterpret the model structure. */
+/* Sync frame buffer (CPU↔GPU transfer) */
+int wubu_frame_buffer_sync(wubu_frame_buffer_t *fb);
 
-typedef struct {
-    char   name[128];    /* tensor name from .pth (e.g. "generator.ups.0.weight") */
-    float *data;          /* tensor data (CPU pointer) */
-    int    n_dims;       /* number of dimensions */
-    int    dims[4];      /* dimension sizes (max 4D for RVC) */
-    int    offset;       /* byte offset in the loaded weight blob */
-} RVCTensor;
-
-typedef struct {
-    RVCTensor *tensors;     /* all weight tensors */
-    int        n_tensors;
-    int        version;     /* RVC_V1, V2, V3 */
-    int        sample_rate;
-    int        mel_channels;
-    int        hidden_channels;
-    int        n_flow_layers;
-    int        n_upsample_layers;
-    int        n_mrf_stacks;
-    int        n_residual_layers;
-} RVCGraph;
-
-/* ---- Main RVC engine ---- */
-typedef struct WuBuRVC WuBuRVC;
-
-typedef struct {
+/* ---- RVC Configuration ---- */
+typedef struct RVCConfig {
     char  model_path[512];
     char  index_path[512];
     char  hubert_path[512];
@@ -140,6 +118,52 @@ typedef struct {
     double pitch_shift;
 } RVCConfig;
 
+/* ---- RVC Model IR (Intermediate Representation) ---- */
+typedef struct {
+    char   name[128];    /* tensor name from .pth */
+    float *data;         /* tensor data (CPU pointer) */
+    int    n_dims;       /* number of dimensions */
+    int    dims[4];      /* dimension sizes (max 4D for RVC) */
+    int    offset;       /* byte offset in the loaded weight blob */
+} RVCTensor;
+
+typedef struct {
+    RVCTensor *tensors;
+    int        n_tensors;
+    int        version;     /* RVC_V1, V2, V3 */
+    int        sample_rate;
+    int        mel_channels;
+    int        hidden_channels;
+    int        n_flow_layers;
+    int        n_upsample_layers;
+    int        n_mrf_stacks;
+    int        n_residual_layers;
+} RVCGraph;
+
+/* ---- Main RVC engine ---- */
+typedef struct WuBuRVC {
+    RVCGraph   graph;
+    wubu_frame_buffer_t workspace;
+    RVCConfig  cfg;
+    int        initialized;
+    int        cuda_available;
+    char       cuda_device_name[256];
+    long       total_inferences;
+    long       cache_hits;
+    double     last_latency_ms;
+    char      *weight_blob;
+    size_t     weight_blob_size;
+    struct WuBuRVCModel *model;
+    int        rvc_version;
+    int        sample_rate;
+    int        mel_channels;
+    int        hidden_channels;
+    int        loaded;
+    int        cuda_active;
+    size_t     vram_total_mb;
+    size_t     vram_used_mb;
+} WuBuRVC;
+
 /* Engine info */
 typedef struct {
     int   cuda_available;
@@ -152,16 +176,15 @@ typedef struct {
     long  total_inferences;
     long  cache_hits;
     double last_latency_ms;
+    int   loaded;
+    int   cuda_active;
 } RVCInfo;
 
-/* Load model weights and build RVCGraph IR.
- * This is the ONLY thing we need from the legacy pipeline —
- * we load and reinterpret everything else ourselves. */
+/* Load model weights and build RVCGraph IR. */
 WuBuRVC *wubu_rvc_load(const RVCConfig *cfg);
 void     wubu_rvc_destroy(WuBuRVC *rvc);
 
-/* Synthesize waveform from mel-spectrogram.
- * Uses our fused kernels through the frame buffer abstraction. */
+/* Synthesize waveform from mel-spectrogram. */
 int wubu_rvc_synthesize(WuBuRVC *rvc,
                          const float *mel_input, int n_frames, int mel_ch,
                          float *output, int n_samples);
@@ -174,24 +197,20 @@ int wubu_rvc_convert_audio(WuBuRVC *rvc,
 /* Get info */
 void wubu_rvc_info(const WuBuRVC *rvc, RVCInfo *out);
 
-/* ---- Kernel launchers (our own fused kernels) ---- */
-/* These operate on wubu_frame_buffer_t, not raw pointers.
- * This is our "game engine" abstraction — everything goes through
- * the frame buffer, and we decide at runtime whether it's on CPU or GPU. */
+/* Check if a model file is actually loaded */
+int wubu_rvc_is_model_loaded(const WuBuRVC *rvc);
 
-/* Fused ActNorm: normalize buffer in-place */
+/* ---- Kernel launchers (our own fused kernels) ---- */
 int wubu_kernel_autonorm(wubu_frame_buffer_t *fb,
                           const float *scale, const float *bias,
                           int n_channels);
 
-/* Fused Affine Coupling: split + transform + swap */
 int wubu_kernel_flow_couple(wubu_frame_buffer_t *input,
                              wubu_frame_buffer_t *output,
                              const float *coupling_w,
                              const float *coupling_b,
                              int n_frames, int hidden_ch);
 
-/* Fused HiFi-GAN: Upsample + MRF + LRELU */
 int wubu_kernel_hifigan(wubu_frame_buffer_t *input,
                          wubu_frame_buffer_t *output,
                          const float *upsample_w,
@@ -199,15 +218,13 @@ int wubu_kernel_hifigan(wubu_frame_buffer_t *input,
                          const float *mrf_w,
                          int n_input, int n_output, int hidden_ch);
 
-/* Fused vocoder: Residual stack + tanh */
 int wubu_kernel_vocoder(wubu_frame_buffer_t *input,
                          wubu_frame_buffer_t *output,
                          const float *res_w, const float *res_b,
                          const float *out_w,
                          int n_samples, int n_layers);
 
-/* Sync frame buffer (CPU↔GPU transfer) */
-int wubu_frame_buffer_sync(wubu_frame_buffer_t *fb);
+int wubu_rvc_cuda_init(WuBuRVC *rvc);
 
 #ifdef __cplusplus
 }

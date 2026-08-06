@@ -180,10 +180,12 @@ static void vc_extract_mel(const float *pcm, int n_samples, int sr,
     free(window);
 }
 
-/* Apply pitch shift + formant shift to PCM */
-static void vc_apply_effects(float *pcm, int n_samples, int sr,
-                              int pitch_shift, double speed,
-                              float formant_shift, float gender) {
+/* Apply pitch shift + formant shift to PCM.
+ * Returns the number of output samples (may differ from n_samples
+ * due to speed/pitch resampling). */
+static int vc_apply_effects(float *pcm, int n_samples, int sr,
+                             int pitch_shift, double speed,
+                             float formant_shift, float gender) {
     (void)sr; (void)formant_shift; (void)gender;
     /* Simple pitch shift via resampling */
     double rate = pow(2.0, pitch_shift / 12.0) / speed;
@@ -209,6 +211,7 @@ static void vc_apply_effects(float *pcm, int n_samples, int sr,
     int copy_n = (n_out < n_samples) ? n_out : n_samples;
     memcpy(pcm, out, copy_n * sizeof(float));
     free(out);
+    return n_out;
 }
 
 int wubu_vc_process_mic(WuBuVoiceChanger *vc,
@@ -234,12 +237,15 @@ int wubu_vc_process_mic(WuBuVoiceChanger *vc,
     if (!pcm_work) return -1;
     memcpy(pcm_work, pcm_input, n_samples * sizeof(float));
 
-    vc_apply_effects(pcm_work, n_samples, vc->cfg.sample_rate,
-                     vp->pitch_shift, vp->speed,
-                     vp->formant_shift, vp->gender);
+    /* vc_apply_effects modifies pcm_work in-place and returns new length */
+    int n_work = vc_apply_effects(pcm_work, n_samples, vc->cfg.sample_rate,
+                                  vp->pitch_shift, vp->speed,
+                                  vp->formant_shift, vp->gender);
+    if (n_work < 0) n_work = n_samples;
 
     /* If RVC model is available, run through our engine */
-    if (vc->rvc && vp->use_rvc && vp->rvc_model[0] != '\0') {
+    if (vc->rvc && vp->use_rvc && vp->rvc_model[0] != '\0' &&
+        wubu_rvc_is_model_loaded(vc->rvc)) {
         /* Extract mel and run through WuBuRVC */
         int n_mel = 80;
         int n_frames = n_samples / 256;
@@ -272,7 +278,7 @@ int wubu_vc_process_mic(WuBuVoiceChanger *vc,
     }
 
     /* Fallback: just pitch-shifted PCM directly */
-    int n_out = n_samples;
+    int n_out = n_work;
     if (n_out > max_samples) n_out = max_samples;
     memcpy(output, pcm_work, n_out * sizeof(float));
 
@@ -327,12 +333,13 @@ int wubu_vc_speak(WuBuVoiceChanger *vc,
     }
 
     /* Apply pitch shift effects */
-    vc_apply_effects(output, n_samples, vc->cfg.sample_rate,
-                     vp->pitch_shift, vp->speed,
-                     vp->formant_shift, vp->gender);
+    int n_speak = vc_apply_effects(output, n_samples, vc->cfg.sample_rate,
+                                   vp->pitch_shift, vp->speed,
+                                   vp->formant_shift, vp->gender);
+    if (n_speak < 0) n_speak = n_samples;
 
     vc->total_frames++;
-    return n_samples;
+    return n_speak;
 }
 
 int wubu_vc_start_capture(WuBuVoiceChanger *vc) {

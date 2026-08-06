@@ -47,6 +47,9 @@ echo "  wubu_sica.c      OK"
 $CC $CFLAGS -c src/wubu_rvc.c    -o build/wubu_rvc.o   -lm 2>&1
 echo "  wubu_rvc.c        OK"
 
+$CC $CFLAGS -c src/wubu_rvc_parity.c -o build/wubu_rvc_parity.o -lsqlite3 -lm 2>&1
+echo "  wubu_rvc_parity.c OK"
+
 $CC $CFLAGS -c src/wubu_buddy.c  -o build/wubu_buddy.o -lsqlite3 -lm 2>&1
 echo "  wubu_buddy.c      OK"
 
@@ -70,11 +73,11 @@ $CC $CFLAGS -DWUBU_DAEMON_MAIN src/wubu_daemon.c src/wubu_wiki.c -lsqlite3 -o bu
 echo "  wubu_daemon.exe   OK"
 
 # WuBuVoice application (real-time voice changer)
-$CC $CFLAGS src/wubuvc.c src/wubu_vc.c src/wubu_rvc.c src/wubu_buddy.c src/wubu_rlm.c -lsqlite3 -lm -o build/wubuvc.exe 2>&1
+$CC $CFLAGS src/wubuvc.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_buddy.c src/wubu_rlm.c -lsqlite3 -lm -o build/wubuvc.exe 2>&1
 echo "  wubuvc.exe        OK"
 
 # WuBuVoice GUI (Win32 GUI app, no console)
-$CC $CFLAGS -municode src/wubugui.c src/wubu_vc.c src/wubu_rvc.c src/wubu_buddy.c src/wubu_rlm.c -lsqlite3 -lm -lgdi32 -lcomctl32 -luser32 -o build/wubugui.exe 2>&1
+$CC $CFLAGS -municode src/wubugui.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_buddy.c src/wubu_rlm.c -lsqlite3 -lm -lgdi32 -lcomctl32 -luser32 -o build/wubugui.exe 2>&1
 echo "  wubugui.exe       OK"
 
 if [ "$1" = "test" ]; then
@@ -104,11 +107,14 @@ if [ "$1" = "test" ]; then
     $CC $CFLAGS src/test_sica.c src/wubu_sica.c -lsqlite3 -o build/test_sica.exe 2>&1
     echo "  test_sica.exe     OK"
 
-    $CC $CFLAGS src/test_rvc.c src/wubu_rvc.c src/wubu_rlm.c -lsqlite3 -lm -o build/test_rvc.exe 2>&1
+    $CC $CFLAGS src/test_rvc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rlm.c -lsqlite3 -lm -o build/test_rvc.exe 2>&1
     echo "  test_rvc.exe      OK"
 
-    $CC $CFLAGS src/test_vc.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rlm.c src/wubu_buddy.c -lsqlite3 -lm -o build/test_vc.exe 2>&1
+    $CC $CFLAGS src/test_vc.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rlm.c src/wubu_buddy.c -lsqlite3 -lm -o build/test_vc.exe 2>&1
     echo "  test_vc.exe       OK"
+
+    $CC $CFLAGS src/test_quality.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rlm.c src/wubu_buddy.c -lsqlite3 -lm -o build/test_quality.exe 2>&1
+    echo "  test_quality.exe  OK"
 
     echo ""
     echo "=== Running all tests ==="
@@ -138,6 +144,10 @@ if [ "$1" = "test" ]; then
 
     rm -f /tmp/test_vc*
     ./build/test_vc.exe || true
+
+    echo "=== WuBuVoice Quality Comparison Suite ==="
+    rm -f /tmp/test_quality*
+    ./build/test_quality.exe || true
 fi
 
 echo ""
