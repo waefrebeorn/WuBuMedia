@@ -30,6 +30,7 @@
  * Build: gcc wubucmd.c -o wubucmd.exe -municode -lgdi32 -luser32 -lole32 -lshlwapi -O2
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 #include <shlwapi.h>
@@ -38,6 +39,7 @@ static int g_count = 0;
 
 /* ---- window helpers ---- */
 BOOL CALLBACK list_cb(HWND hwnd, LPARAM lp) {
+    (void)lp;  /* unused — EnumWindows doesn't pass meaningful data */
     if (!IsWindowVisible(hwnd)) return TRUE;
     int len = GetWindowTextLengthW(hwnd);
     if (len == 0) return TRUE;
