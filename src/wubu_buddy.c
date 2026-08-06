@@ -172,7 +172,10 @@ void wubu_buddy_update_mood(WuBuBuddy *buddy, double valence, double arousal) {
         return;
     }
 
-    RLMMood mood = {(float)valence, (float)arousal, 0.0f};
+    RLMMood mood;
+    memset(&mood, 0, sizeof(mood));
+    mood.valence = (float)valence;
+    mood.arousal = (float)arousal;
     wubu_rlm_update_mood(buddy->rlm, &mood, valence, arousal);
 
     buddy->state.valence = (float)valence;

@@ -50,6 +50,9 @@ echo "  wubu_rvc.c        OK"
 $CC $CFLAGS -c src/wubu_buddy.c  -o build/wubu_buddy.o -lsqlite3 -lm 2>&1
 echo "  wubu_buddy.c      OK"
 
+$CC $CFLAGS -c src/wubu_vc.c     -o build/wubu_vc.o   -lsqlite3 -lm 2>&1
+echo "  wubu_vc.c         OK"
+
 $CC $CFLAGS -c src/wubu_daemon.c -o build/wubu_daemon.o -lsqlite3 2>&1
 echo "  wubu_daemon.c    OK"
 
@@ -96,6 +99,9 @@ if [ "$1" = "test" ]; then
     $CC $CFLAGS src/test_rvc.c src/wubu_rvc.c src/wubu_rlm.c -lsqlite3 -lm -o build/test_rvc.exe 2>&1
     echo "  test_rvc.exe      OK"
 
+    $CC $CFLAGS src/test_vc.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rlm.c src/wubu_buddy.c -lsqlite3 -lm -o build/test_vc.exe 2>&1
+    echo "  test_vc.exe       OK"
+
     echo ""
     echo "=== Running all tests ==="
     rm -f /tmp/test_wiki*.db* /tmp/test_rlm*.db* /tmp/test_recs.db* /tmp/test_cohost.db* /tmp/test_agent*.db* /tmp/test_rest*.db* /tmp/self_test.log /tmp/test_debug*
@@ -121,6 +127,9 @@ if [ "$1" = "test" ]; then
 
     rm -f /tmp/test_rvc*
     ./build/test_rvc.exe || true
+
+    rm -f /tmp/test_vc*
+    ./build/test_vc.exe || true
 fi
 
 echo ""
