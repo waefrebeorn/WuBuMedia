@@ -166,14 +166,25 @@ struct WuBuRVCModel {
     /* HiFi-GAN generator */
     int   n_residual_layers;
     float *hifi_upsample[4];   /* 4x upsampling in 4 layers */
+    int    hifi_upsample_len[4];
+    float *hifi_upsample_denorm[4]; /* weight_norm de-normalized (weight_g * weight_v/||v||) */
+    int    hifi_upsample_denorm_len[4];
     float *hifi_mrf[4];        /* multi-receptive-field blocks */
+    int    hifi_mrf_len[4];
+    float *hifi_mrf0;          /* resblocks convs1 (alias for convenience) */
+    int    hifi_mrf0_len;
+    float *hifi_mrf1;          /* resblocks convs2 (alias for convenience) */
+    int    hifi_mrf1_len;
     float *hifi_input_conv;
+    int    hifi_input_conv_len;
 
     /* Vocoder: NSF-HiFiGAN */
     float *vocoder_conv_pre;
+    int    vocoder_conv_pre_len;
     float *vocoder_ups[4];
     float *vocoder_mrf[4];
     float *vocoder_conv_post;
+    int    vocoder_conv_post_len;
 
     /* FAISS index data (for retrieval) */
     float *retrieval_features;  /* Training set content features */
@@ -181,6 +192,12 @@ struct WuBuRVCModel {
     int    index_dim;
     float *retrieval_vectors;   /* [n_index * dim] */
     int    n_retrieval;         /* top-k retrieval */
+
+    /* Tensor map (loaded from .pth / .bin) */
+    RVCTensor *tensors;
+    int       n_tensors;
+    float    *weight_blob;     /* raw blob backing tensor data */
+    size_t    weight_blob_size;
 
     /* Config */
     int   sample_rate;
@@ -240,6 +257,27 @@ int wubu_rvc_retrieve(const WuBuRVCModel *model,
                        const float *query_feat, int dim,
                        int k, int *out_indices);
 
+/* ── Exact HiFi-GAN kernel (transposed conv + MRF + conv_post) ──
+ * Replaces the simplified linear-interpolation wubu_kernel_hifigan.
+ * Produces output matching PyTorch ConvTranspose1d (400x upsample).
+ *
+ * Upsample rates: [10, 10, 2, 2] → total 400x
+ * Upsample kernels: [16, 16, 4, 4]
+ * Channels: 256→512→256→128→64→1 (conv_post)
+ *
+ * Input mel: (n_frames, 256) — pre-conv_pre + PixelShuffle
+ * Output audio: (n_frames * ~396, 1) — caller-allocated
+ *
+ * resblock_w/stack/block/conv: dec.resblocks.{s}.convs{k}.{b}.weight (de-norm)
+ * resblock_k: kernel sizes [3,7,11] for convs1, [3,7,11] for convs2
+ * resblock_dil: dilations [(1,3),(1,3),(1,3)] for stacks 0,1,2
+ */
+int wubu_kernel_hifigan_exact(const WuBuRVCModel *model,
+                               const float *mel_input,
+                               int n_frames,
+                               float *output,
+                               int max_output);
+
 /* Synthesize audio from content features + F0.
  * Full RVC pipeline: content → flow posterior → generator → HiFi-GAN.
  * Matches Mangio-RVC-Fork's VITS + NSF-HiFiGAN output.
@@ -254,6 +292,22 @@ int wubu_rvc_synthesize_full(WuBuRVCModel *model,
 
 /* Clean up */
 void wubu_rvc_model_free(WuBuRVCModel *model);
+
+/* ── Flat-binary weight loader (WUBU format) ──
+ * Reads the WUBU-format binary produced by tools/extract_rvc_weights.py.
+ * Maps tensor names to internal weight arrays (hifi_upsample, hifi_mrf, etc.).
+ * This is the bridge between a real .pth checkpoint and our fused kernels. */
+int wubu_rvc_load_weights(WuBuRVCModel *model, const char *bin_path);
+
+/* Lookup a tensor by name (substring match). Returns NULL if not found. */
+const RVCTensor *wubu_rvc_find_tensor(const WuBuRVCModel *model, const char *name);
+
+/* Apply weight normalization de-normalization:
+ * W = weight_g * (weight_v / ||weight_v||)
+ * Resolves weight_g + weight_v decomposition used in RVC v2 checkpoints.
+ * per_ch = total_elements / n_channels */
+void wubu_rvc_denormalize_weight(const float *weight_g, const float *weight_v,
+                                  float *out, int n_elements, int n_channels);
 
 /* Model info */
 typedef struct {

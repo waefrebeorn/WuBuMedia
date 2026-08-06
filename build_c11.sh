@@ -6,7 +6,7 @@
 #   test     — also build and run all test executables
 #
 CC=cc
-CFLAGS="-Wall -Wextra -std=c11 -g -I src"
+CFLAGS="-Wall -Wextra -std=c11 -I src"
 
 echo "=== Compiling C11 modules ==="
 
@@ -66,17 +66,7 @@ $CC $CFLAGS -c src/wubucmd.c     -o build/wubucmd.o     2>&1
 echo "  wubucmd.c        OK"
 
 echo ""
-echo "=== Compiling modules (object files) ==="
-$CC $CFLAGS -c src/wubucmd.c -o build/wubucmd.o 2>&1
-echo "  wubucmd.c         OK (object only, needs -lgdi32 -luser32 to link)"
-
-echo ""
 echo "=== Building executables ==="
-$CC $CFLAGS -DWUBU_DAEMON_MAIN src/wubu_daemon.c src/wubu_wiki.c -lsqlite3 -o build/wubu_daemon.exe 2>&1
-echo "  wubu_daemon.exe   OK"
-
-$CC $CFLAGS -c src/wubu_rcu.c -o build/wubu_rcu.o 2>&1
-echo "  wubu_rcu.c        OK"
 
 # WuBu model detector tool (drag-drop file analysis)
 $CC $CFLAGS src/wubu_detect.c -I src -lm -o build/wubu_detect.exe 2>&1
@@ -96,12 +86,22 @@ echo "  wubuvc.exe        OK"
 $CC $CFLAGS -municode src/wubugui.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rcu.c src/wubu_model_dock.c src/wubu_wubu.c src/wubu_buddy.c src/wubu_rlm.c -I src -lsqlite3 -lm -lgdi32 -lcomctl32 -luser32 -lcomdlg32 -o build/wubugui.exe 2>&1
 echo "  wubugui.exe       OK"
 
-# Monolithic CUDA kernel (requires nvcc)
-if command -v nvcc >/dev/null 2>&1 || [ -x "/c/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc" ]; then
-    echo "=== Compiling CUDA kernels ==="
-    NVCC="/c/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc"
-    $NVCC -arch=sm_75 -rdc=true src/wubu_rvc_mono.cu -o build/wubu_rvc_mono.o 2>&1
-    echo "  wubu_rvc_mono.cu  OK (sm_75)"
+# CUDA kernels: compiled via nvcc + MSVC host compiler (sm_75, RTX 2080 SUPER).
+# nvcc on Windows requires MSVC's cl.exe — `command -v cl` fails in MSYS2 bash
+# even when cl.exe is installed, so delegate to build/cuda_build.bat which calls
+# vcvars64.bat to set up the MSVC environment properly.
+# See skill: windows-python-cuda-toolchain (references/known-good-builds.md).
+if [ -f "/c/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.4/bin/nvcc" ]; then
+    echo "=== Compiling CUDA kernels (nvcc + MSVC, sm_75) ==="
+    cmd.exe /c "build\\cuda_build.bat" 2>&1 | grep -E "\[OK\]|\[FAIL\]|CUDA_BUILD"
+    if [ -f build/wubu_rvc_mono.o ] && [ -f build/wubu_rvc_kernels.o ]; then
+        echo "  CUDA kernels OK (sm_75, RTX 2080 SUPER)"
+    else
+        echo "  WARNING: CUDA kernel artifacts missing — see build/*.log"
+    fi
+else
+    echo "=== CUDA kernels (skipped — nvcc not installed) ==="
+    echo "  Install CUDA Toolkit v12.4 to enable sm_75 kernel compilation"
 fi
 
 if [ "$1" = "test" ]; then

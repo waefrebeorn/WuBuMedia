@@ -9,6 +9,7 @@
 
 #define _USE_MATH_DEFINES
 #include "wubu_rvc.h"
+#include "wubu_rvc_parity.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -223,14 +224,66 @@ int wubu_kernel_vocoder(wubu_frame_buffer_t *input,
 /* ---- Main pipeline ---- */
 
 static int rvc_run_pipeline(WuBuRVC *rvc,
-                             const float *mel_input, int n_frames,
+                             const float *mel_input, int n_frames, int mel_ch_input,
                              float *output) {
     RVCGraph *g = &rvc->graph;
-    int mel_ch = g->mel_channels;
+    int mel_ch = mel_ch_input; /* actual mel channels from caller (usually 80) */
     int hidden = g->hidden_channels;
 
+    /* Look up real tensors from the loaded model.
+     * De-normalized weight_norm tensors are pre-computed in wubu_rvc_load_weights. */
+    const float *hifi_w = NULL;
+    const float *flow_w = NULL;
+    const float *flow_b = NULL;
+    const float *vocoder_w = NULL;
+    if (rvc->model) {
+        /* Use de-normalized upsampling weights if available */
+        if (rvc->model->hifi_upsample_denorm[0]) {
+            hifi_w = rvc->model->hifi_upsample_denorm[0];
+        } else if (rvc->model->hifi_upsample[0]) {
+            hifi_w = rvc->model->hifi_upsample[0];
+        }
+        /* Flow coupling weights (look up from tensor map) */
+        const RVCTensor *ft = wubu_rvc_find_tensor(rvc->model, "flow");
+        if (ft && ft->data) flow_w = ft->data;
+        /* Vocoder output conv_post weights */
+        const RVCTensor *vt = wubu_rvc_find_tensor(rvc->model, "dec.conv_post.weight");
+        if (vt && vt->data) vocoder_w = vt->data;
+    }
+
     /* Frame buffers for each stage */
-    wubu_frame_buffer_t buf_in, buf_flow, buf_gen, buf_out;
+    wubu_frame_buffer_t buf_in = {0}, buf_flow = {0}, buf_gen = {0}, buf_out = {0};
+    int n_audio = 0;
+
+    if (rvc->model && rvc->model->loaded &&
+        rvc->model->hifi_upsample_denorm[0] && rvc->model->hifi_upsample_denorm[3]) {
+        /* Exact kernel: ConvTranspose1d + MRF + conv_post -> 400x upsample.
+         * Expects (n_frames, 256) row-major mel, takes first 192 channels.
+         * We bypass flow coupling/autonorm entirely — the exact kernel
+         * reads mel directly from mel_input, zero-padded to 192 channels. */
+        int max_audio = n_frames * 512; /* generous upper bound */
+        float *gen_input = (float *)calloc((size_t)n_frames * 256, sizeof(float));
+        float *gen_out = (float *)calloc((size_t)max_audio, sizeof(float));
+        if (gen_input && gen_out) {
+            /* Zero-pad mel (mel_ch channels) → 256 channels (inter_ch=192 padded) */
+            for (int f = 0; f < n_frames; f++)
+                for (int c = 0; c < mel_ch && c < 256; c++)
+                    gen_input[(size_t)f * 256 + c] = mel_input[(size_t)f * mel_ch + c];
+            n_audio = wubu_kernel_hifigan_exact(rvc->model, gen_input,
+                                                n_frames, gen_out, max_audio);
+            if (n_audio > 0)
+                memcpy(output, gen_out, (size_t)n_audio * sizeof(float));
+            else
+                n_audio = -1;
+        } else {
+            n_audio = -1;
+        }
+        free(gen_input);
+        free(gen_out);
+        return n_audio;
+    }
+
+    /* Fallback: simplified kernel (no exact weights) */
     wubu_frame_buffer_create(&buf_in, (size_t)n_frames * mel_ch,
                               WUBU_BUF_CPU, "mel_in");
     wubu_frame_buffer_write(&buf_in, mel_input, (size_t)n_frames * mel_ch);
@@ -238,11 +291,10 @@ static int rvc_run_pipeline(WuBuRVC *rvc,
     /* Flow coupling */
     wubu_frame_buffer_create(&buf_flow, (size_t)n_frames * hidden,
                               WUBU_BUF_CPU, "flow_out");
-    /* Flow coupling — need to project mel → hidden first */
+    /* Project mel (80-dim) -> hidden (256-dim) via zero-pad */
     wubu_frame_buffer_t buf_proj;
     wubu_frame_buffer_create(&buf_proj, (size_t)n_frames * hidden,
                               WUBU_BUF_CPU, "proj");
-    /* Project mel (80-dim) → hidden (512-dim) via zero-pad */
     {
         const float *in = (const float *)buf_in.ptr;
         float *proj = (float *)buf_proj.ptr;
@@ -253,29 +305,26 @@ static int rvc_run_pipeline(WuBuRVC *rvc,
         }
     }
     wubu_kernel_autonorm(&buf_proj, NULL, NULL, hidden);
-    wubu_kernel_flow_couple(&buf_proj, &buf_flow, NULL, NULL, n_frames, hidden);
+    wubu_kernel_flow_couple(&buf_proj, &buf_flow, flow_w, flow_b, n_frames, hidden);
 
-    /* HiFi-GAN generator */
-    int n_audio = n_frames * 256;
+    n_audio = n_frames * 256;
+    if (n_audio <= 0) n_audio = n_frames * 2;
     wubu_frame_buffer_create(&buf_gen, (size_t)n_audio, WUBU_BUF_CPU, "gen_out");
-    wubu_kernel_hifigan(&buf_flow, &buf_gen, NULL, NULL, NULL,
+    wubu_frame_buffer_create(&buf_out, (size_t)n_audio, WUBU_BUF_CPU, "audio_out");
+    wubu_kernel_hifigan(&buf_flow, &buf_gen, hifi_w, NULL, NULL,
                          n_frames * hidden, n_audio, hidden);
-
-    /* Vocoder */
-    wubu_frame_buffer_create(&buf_out, n_audio, WUBU_BUF_CPU, "audio_out");
-    wubu_kernel_vocoder(&buf_gen, &buf_out, NULL, NULL, NULL,
+    wubu_frame_buffer_sync(&buf_gen);
+    wubu_frame_buffer_read(&buf_gen, (float*)buf_out.ptr, n_audio);
+    wubu_kernel_vocoder(&buf_gen, &buf_out, NULL, NULL, vocoder_w,
                          n_audio, g->n_residual_layers);
-
-    /* Read output */
     wubu_frame_buffer_sync(&buf_out);
     wubu_frame_buffer_read(&buf_out, output, n_audio);
+    wubu_frame_buffer_destroy(&buf_gen);
+    wubu_frame_buffer_destroy(&buf_out);
 
     wubu_frame_buffer_destroy(&buf_in);
     wubu_frame_buffer_destroy(&buf_proj);
     wubu_frame_buffer_destroy(&buf_flow);
-    wubu_frame_buffer_destroy(&buf_gen);
-    wubu_frame_buffer_destroy(&buf_out);
-
     return n_audio;
 }
 
@@ -312,20 +361,103 @@ WuBuRVC *wubu_rvc_load(const RVCConfig *cfg) {
         return NULL;
     }
 
-    /* Check for model file */
+    /* Check for model file — if real .pth exists, load tensor weights */
     FILE *mf = NULL;
     if (cfg->model_path[0] != '\0') {
         mf = fopen(cfg->model_path, "rb");
     }
     if (mf) {
         fclose(mf);
-        /* In full implementation: load .pth via gguf_reader */
-        rvc->weight_blob_size = 0;
-        rvc->weight_blob = NULL;
+        /* Load .pth weights via parity engine — extracts tensor data. */
+        rvc->model = (struct WuBuRVCModel *)wubu_rvc_load_model(cfg->model_path);
+        if (rvc->model) {
+            /* Generate .bin from .pth if it doesn't exist (uses torch bridge).
+             * Look for the WuBuMedia venv Python, then system python. */
+            const char *py_candidates[] = {
+                getenv("WUBU_PYTHON"),
+                "C:/Users/eman5/WuBuMedia/.venv_win/Scripts/python.exe",
+                "/c/Users/eman5/WuBuMedia/.venv_win/Scripts/python.exe",
+                "python",
+                NULL
+            };
+            const char *py = NULL;
+            for (int pi = 0; py_candidates[pi] && !py; pi++) {
+                if (py_candidates[pi] && strlen(py_candidates[pi]) > 0) {
+                    /* Check if this Python exists */
+                    char test[512];
+                    snprintf(test, sizeof(test), "\"%s\" -c \"import torch\" 2>nul",
+                             py_candidates[pi]);
+                    if (system(test) == 0) {
+                        py = py_candidates[pi];
+                    }
+                }
+            }
+            if (!py) py = "python";
+            char bin_path[600];
+            /* Look for pre-generated .bin first, then the auto-generated name */
+            const char *bin_candidates[] = {
+                "models/rvc/cartman/cartman_weights.bin",
+                "models/rvc/cartman/EricCartmanV1_e650_s10400.weights.bin",
+                NULL
+            };
+            int bin_found = 0;
+            for (int bi = 0; bin_candidates[bi] && !bin_found; bi++) {
+                FILE *bf = fopen(bin_candidates[bi], "rb");
+                if (bf) { fclose(bf); bin_found = 1;
+                    strncpy(bin_path, bin_candidates[bi], sizeof(bin_path) - 1);
+                    bin_path[sizeof(bin_path) - 1] = '\0';
+                }
+            }
+            if (!bin_found) {
+                /* Use model_path + .weights.bin as fallback */
+                char fallback[600];
+                snprintf(fallback, sizeof(fallback), "%s.weights.bin", cfg->model_path);
+                FILE *bf = fopen(fallback, "rb");
+                if (bf) {
+                    fclose(bf);
+                    bin_found = 1;
+                    strncpy(bin_path, fallback, sizeof(bin_path) - 1);
+                    bin_path[sizeof(bin_path) - 1] = '\0';
+                } else {
+                    /* .bin doesn't exist — try to generate via Python bridge */
+                    char cmd[2048];
+                    snprintf(cmd, sizeof(cmd),
+                             "\"%s\" tools/extract_rvc_weights.py \"%s\" \"%s\" 2>/dev/null",
+                             py, cfg->model_path, bin_path);
+                    int rc = system(cmd);
+                    if (rc != 0) {
+                        fprintf(stderr, "WuBuRVC: .bin generation skipped (rc=%d)\n", rc);
+                    }
+                }
+            }
+            /* Load flat-binary weights into model tensors */
+            int wrc = wubu_rvc_load_weights(rvc->model, bin_path);
+            if (wrc == 0) {
+                rvc->loaded = 1;
+                /* Sync architecture params from loaded model */
+                rvc->graph.hidden_channels = rvc->model->hidden_channels;
+                rvc->graph.n_flow_layers = rvc->model->n_flow_layers;
+                rvc->graph.n_residual_layers = rvc->model->n_residual_layers;
+                rvc->graph.sample_rate = rvc->model->sample_rate;
+                rvc->graph.mel_channels = rvc->model->mel_channels;
+                fprintf(stderr, "WuBuRVC: loaded model %s (v%d, %d tensors, hidden=%d)\n",
+                        cfg->model_path, rvc->model->version,
+                        rvc->model->n_tensors, rvc->model->hidden_channels);
+            }
+            /* Load FAISS index if provided */
+            if (cfg->index_path[0] != '\0') {
+                FILE *ifile = fopen(cfg->index_path, "rb");
+                if (ifile) {
+                    fclose(ifile);
+                    wubu_rvc_load_index(rvc->model, cfg->index_path);
+                    fprintf(stderr, "WuBuRVC: loaded FAISS index %s (%d vectors)\n",
+                            cfg->index_path, rvc->model->n_index_vectors);
+                }
+            }
+        }
     } else {
         /* No model file — run with default synthetic weights */
-        fprintf(stderr, "WuBuRVC: model %s not found, using defaults\n",
-                cfg->model_path);
+        fprintf(stderr, "WuBuRVC: model %s not found, using defaults\n", cfg->model_path);
     }
 
     rvc->initialized = 1;
@@ -337,9 +469,7 @@ void wubu_rvc_destroy(WuBuRVC *rvc) {
     free(rvc->graph.tensors);
     free(rvc->weight_blob);
     if (rvc->model) {
-        /* Free as WuBuRVCModel — but we don't have the full type
-         * here, so just free the pointer */
-        free(rvc->model);
+        wubu_rvc_model_free((WuBuRVCModel *)rvc->model);
         rvc->model = NULL;
     }
     wubu_frame_buffer_destroy(&rvc->workspace);
@@ -349,11 +479,10 @@ void wubu_rvc_destroy(WuBuRVC *rvc) {
 int wubu_rvc_synthesize(WuBuRVC *rvc,
                          const float *mel_input, int n_frames, int mel_ch,
                          float *output, int n_samples) {
-    (void)mel_ch; /* we use our configured mel_channels */
     if (!rvc || !rvc->initialized) return WUBU_RVC_ERR_NOINIT;
     if (!mel_input || !output || n_frames <= 0) return WUBU_RVC_ERR_ARGS;
 
-    int n_audio = rvc_run_pipeline(rvc, mel_input, n_frames, output);
+    int n_audio = rvc_run_pipeline(rvc, mel_input, n_frames, mel_ch, output);
     if (n_audio < 0) return n_audio;
 
     if (n_audio > n_samples) n_audio = n_samples;
@@ -435,7 +564,7 @@ void wubu_rvc_info(const WuBuRVC *rvc, RVCInfo *out) {
 /* Check if a real model file is loaded (not just defaults) */
 int wubu_rvc_is_model_loaded(const WuBuRVC *rvc) {
     if (!rvc || !rvc->initialized) return 0;
-    return rvc->weight_blob != NULL;
+    return rvc->model != NULL && rvc->loaded;
 }
 
 /* CUDA init stub */

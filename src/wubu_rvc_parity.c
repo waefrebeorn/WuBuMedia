@@ -815,8 +815,20 @@ void wubu_rvc_model_info(const WuBuRVCModel *model, RVCModelInfo *out) {
 
 void wubu_rvc_model_free(WuBuRVCModel *model) {
     if (!model) return;
+    /* Free individual tensor weight arrays from the lookup map */
+    if (model->tensors) {
+        for (int i = 0; i < model->n_tensors; i++) {
+            free(model->tensors[i].data);
+        }
+    }
+    free(model->tensors);
+    free(model->weight_blob);
     free(model->retrieval_features);
     free(model->retrieval_vectors);
+    /* Free de-normalized weight arrays */
+    for (int i = 0; i < 4; i++) {
+        free(model->hifi_upsample_denorm[i]);
+    }
     free(model);
 }
 
