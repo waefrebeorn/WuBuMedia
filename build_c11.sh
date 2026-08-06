@@ -143,6 +143,14 @@ if [ "$1" = "test" ]; then
     $CC $CFLAGS src/test_rcu.c src/wubu_rcu.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_wubu.c -I src -lsqlite3 -lm -o build/test_rcu.exe 2>&1
     echo "  test_rcu.exe      OK"
 
+    # End-to-end RVC example (produces outputs/cartman_example.wav)
+    $CC $CFLAGS src/test_rvc_example.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rvc_weights.c src/wubu_rvc_kernels_exact.c -I src -lsqlite3 -lm -o build/test_rvc_example.exe 2>&1
+    echo "  test_rvc_example.exe  OK"
+
+    # RVC parity comparison vs PyTorch reference (457 tensors loaded)
+    $CC $CFLAGS src/test_rvc_compare.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rvc_weights.c src/wubu_rvc_kernels_exact.c -I src -lsqlite3 -lm -o build/test_rvc_compare.exe 2>&1
+    echo "  test_rvc_compare.exe  OK"
+
     echo ""
     echo "=== Running all tests ==="
     rm -f /tmp/test_wiki*.db* /tmp/test_rlm*.db* /tmp/test_recs.db* /tmp/test_cohost.db* /tmp/test_agent*.db* /tmp/test_rest*.db* /tmp/self_test.log /tmp/test_debug*
@@ -179,6 +187,14 @@ if [ "$1" = "test" ]; then
     echo "=== WuBuRVC RCU Hot-Swap Test Suite ==="
     rm -f /tmp/test_rcu*
     ./build/test_rcu.exe || true
+
+    echo "=== WuBuRVC End-to-End Example ==="
+    rm -f /tmp/test_rvc_example*
+    ./build/test_rvc_example.exe || true
+
+    echo "=== WuBuRVC Parity Comparison (Cartman v2) ==="
+    rm -f /tmp/test_rvc_compare*
+    ./build/test_rvc_compare.exe || true
 fi
 
 echo ""
