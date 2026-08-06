@@ -25,6 +25,8 @@
 
 #include "wubu_vc.h"
 #include "wubu_rvc.h"
+#include "wubu_rcu.h"
+#include "wubu_model_dock.h"
 
 /* ── IDs ───────────────────────────────── */
 #define IDC_VOICE_COMBO    1001
@@ -40,6 +42,9 @@
 #define IDC_LATENCY_LABEL  1011
 #define IDC_RAM_LABEL      1012
 #define IDC_VOICES_LIST    1013
+#define IDC_BTN_HOTSWAP    1014
+#define IDC_BTN_MINDMELD   1015
+#define IDC_MODEL_PATH     1016
 
 /* ── Global state ── */
 static HWND g_hwnd = NULL;
@@ -53,6 +58,13 @@ static HWND g_hStatus = NULL;
 static HWND g_hVu = NULL;
 static HWND g_hLatency = NULL;
 static HWND g_hRam = NULL;
+static HWND g_hModelPath = NULL;
+static HWND g_hHotSwapBtn = NULL;
+
+/* RCU hot-swap state */
+static wubu_model_dock_t g_dock;
+static int g_mind_meld_enabled = 0;
+static int g_hotswap_pending = 0;
 
 /* Forward decls */
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -61,6 +73,9 @@ void on_speak_click(void);
 void on_bench_click(void);
 void on_mic_click(void);
 void on_voice_change(void);
+void on_load_model_click(void);
+void on_hotswap_click(void);
+void on_mindmeld_click(void);
 void update_display(void);
 
 static HWND mk_label(HWND parent, const wchar_t *text, int x, int y, int w, int h) {
@@ -162,7 +177,12 @@ static void create_controls(HWND parent) {
     mk_button(parent, L"Mic ON", 190, 135, 80, 30, IDC_BTN_MIC);
     mk_button(parent, L"Load Model", 280, 135, 80, 30, IDC_BTN_LOADMODEL);
 
-    /* VU Meter (custom control) */
+    /* Hot-swap + Mind-Meld buttons */
+    g_hHotSwapBtn = mk_button(parent, L"Hot-Swap On", 370, 135, 80, 30, IDC_BTN_HOTSWAP);
+    mk_button(parent, L"Mind-Meld", 460, 135, 80, 30, IDC_BTN_MINDMELD);
+
+    /* Model path display */
+    g_hModelPath = mk_label(parent, L"Model: (none loaded) | Drag & drop .pth + .index to import", 10, 165, 480, 20);
     g_hVu = CreateWindowEx(0, L"VUMETER", L"",
         WS_CHILD | WS_VISIBLE | WS_BORDER,
         370, 10, 120, 100, parent, (HMENU)(LONG_PTR)(long)IDC_VU_METER,
@@ -188,6 +208,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDC_BTN_SPEAK: on_speak_click(); break;
         case IDC_BTN_BENCH: on_bench_click(); break;
         case IDC_BTN_MIC:   on_mic_click(); break;
+        case IDC_BTN_LOADMODEL: on_load_model_click(); break;
+        case IDC_BTN_HOTSWAP: on_hotswap_click(); break;
+        case IDC_BTN_MINDMELD: on_mindmeld_click(); break;
         case IDC_VOICE_COMBO:
             if (HIWORD(wp) == CBN_SELCHANGE) on_voice_change();
             break;
@@ -202,6 +225,74 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
+
+    case WM_DROPFILES: {
+        /* Dragon drop support — handle multiple file drops */
+        HDROP hDrop = (HDROP)wp;
+        char pth_path[512] = "";
+        char idx_path[512] = "";
+        char name[128] = "";
+        int n_files = DragQueryFileA(hDrop, 0xFFFFFFFF, NULL, 0);
+
+        for (int i = 0; i < n_files && i < 20; i++) {
+            char fpath[520];
+            DragQueryFileA(hDrop, i, fpath, sizeof(fpath));
+
+            /* Detect file type by extension */
+            const char *dot = strrchr(fpath, '.');
+            if (!dot) dot = fpath + strlen(fpath);
+
+            if (strcasecmp(dot, ".pth") == 0) {
+                strncpy(pth_path, fpath, sizeof(pth_path) - 1);
+                /* Extract model name */
+                const char *base = strrchr(fpath, '\\');
+                base = base ? base + 1 : fpath;
+                strncpy(name, base, sizeof(name) - 1);
+                char *nd = strrchr(name, '.');
+                if (nd) *nd = '\0';
+            } else if (strcasecmp(dot, ".index") == 0) {
+                strncpy(idx_path, fpath, sizeof(idx_path) - 1);
+            } else if (strcasecmp(dot, ".wubu") == 0) {
+                /* Direct .wubu — no index needed */
+                strncpy(pth_path, fpath, sizeof(pth_path) - 1);
+                const char *base = strrchr(fpath, '\\');
+                base = base ? base + 1 : fpath;
+                strncpy(name, base, sizeof(name) - 1);
+                char *nd = strrchr(name, '.');
+                if (nd) *nd = '\0';
+            }
+        }
+        DragFinish(hDrop);
+
+        if (pth_path[0]) {
+            /* Auto-detect index if not found */
+            if (idx_path[0] == '\0') {
+                char auto_idx[520];
+                int len = (int)strlen(pth_path);
+                if (len > 4) {
+                    memcpy(auto_idx, pth_path, len - 4);
+                    strcpy(auto_idx + len - 4, ".index");
+                    FILE *tf = fopen(auto_idx, "rb");
+                    if (tf) { fclose(tf); strncpy(idx_path, auto_idx, sizeof(idx_path) - 1); }
+                }
+            }
+
+            char display_name[128];
+            if (name[0]) strncpy(display_name, name, sizeof(display_name) - 1);
+            else strncpy(display_name, "dropped", sizeof(display_name) - 1);
+            display_name[sizeof(display_name) - 1] = '\0';
+
+            wubu_model_dock_add(&g_dock, pth_path,
+                idx_path[0] ? idx_path : NULL,
+                display_name, 2);
+
+            char status[512];
+            snprintf(status, sizeof(status), "Dropped: %s (v2, %s)",
+                     display_name, idx_path[0] ? "pth+index" : "pth only");
+            SetWindowTextA(g_hStatus, status);
+        }
+        return 0;
+    }
     }
     return DefWindowProc(hwnd, msg, wp, lp);
 }
@@ -302,6 +393,83 @@ void on_mic_click(void) {
     }
 }
 
+/* ── Model hot-swap handlers ── */
+void on_load_model_click(void) {
+    /* Open file dialog for .pth model */
+    OPENFILENAMEA ofn;
+    char szFile[512];
+    memset(&ofn, 0, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile);
+    ofn.lpstrFilter = "RVC Models\0*.pth;*.wubu;*.index\0All Files\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+
+    if (GetOpenFileNameA(&ofn)) {
+        char name[128];
+        /* Extract filename without extension as model name */
+        const char *base = strrchr(szFile, '\\');
+        if (!base) base = strrchr(szFile, '/');
+        base = base ? base + 1 : szFile;
+        strncpy(name, base, sizeof(name) - 1);
+        name[sizeof(name) - 1] = '\0';
+        char *dot = strrchr(name, '.');
+        if (dot) *dot = '\0';
+
+        /* Look for matching .index file */
+        char idx_path[520];
+        int len = snprintf(idx_path, sizeof(idx_path) - 6, "%s", szFile);
+        if (len > 0) {
+            snprintf(idx_path + len, sizeof(idx_path) - len, ".index");
+        }
+        FILE *tf = fopen(idx_path, "rb");
+        if (!tf) idx_path[0] = '\0';
+        else fclose(tf);
+
+        /* Add to dock (this starts async loading) */
+        wubu_model_dock_add(&g_dock, szFile,
+            idx_path[0] ? idx_path : NULL,
+            name, 2);
+
+        char status[512];
+        snprintf(status, sizeof(status), "Model queued: %s (async load)", name);
+        SetWindowTextA(g_hStatus, status);
+        SetWindowTextA(g_hModelPath, status);
+    }
+}
+
+void on_hotswap_click(void) {
+    /* Toggle hot-swap mode */
+    g_hotswap_pending = !g_hotswap_pending;
+    const char *btn_text = g_hotswap_pending ? "Hot-Swap Off" : "Hot-Swap On";
+    SetWindowTextA(g_hHotSwapBtn, btn_text);
+
+    wubu_model_dock_set_prewarm(&g_dock, g_hotswap_pending ? 1 : 0);
+
+    /* Poll for completed loads immediately */
+    wubu_model_dock_poll(&g_dock);
+
+    char status[256];
+    snprintf(status, sizeof(status),
+        "Hot-swap: %s | Loaded: %d/%d models",
+        g_hotswap_pending ? "ON" : "OFF",
+        g_dock.n_loaded, g_dock.count);
+    SetWindowTextA(g_hStatus, status);
+}
+
+void on_mindmeld_click(void) {
+    g_mind_meld_enabled = !g_mind_meld_enabled;
+    wubu_model_dock_set_mind_meld(&g_dock, g_mind_meld_enabled);
+
+    char status[256];
+    snprintf(status, sizeof(status),
+        "Mind-Meld: %s | %s",
+        g_mind_meld_enabled ? "ON (3-encoder fusion)" : "OFF (standard)",
+        g_mind_meld_enabled ? "3-encoder fusion active" : "standard HuBERT");
+    SetWindowTextA(g_hStatus, status);
+}
+
 void update_display(void) {
     if (!g_vc) return;
 
@@ -325,6 +493,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR lpCmd, int nCmd) {
     wubu_vc_default_config(&g_cfg);
     g_cfg.sample_rate = 22050;
     g_vc = wubu_vc_create(&g_cfg);
+
+    /* Initialize model dock */
+    wubu_model_dock_init(&g_dock);
 
     /* Register VU meter class */
     WNDCLASS wc = {0};
@@ -350,13 +521,20 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, PWSTR lpCmd, int nCmd) {
     ShowWindow(g_hwnd, nCmd);
     UpdateWindow(g_hwnd);
 
+    /* Enable drag-drop on main window */
+    DragAcceptFiles(g_hwnd, TRUE);
+
     /* Message loop */
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
+        /* Poll model dock for completed loads (non-realtime check) */
+        if (g_dock.count > 0)
+            wubu_model_dock_poll(&g_dock);
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
 
     if (g_vc) wubu_vc_destroy(g_vc);
+    wubu_model_dock_destroy(&g_dock);
     return (int)msg.wParam;
 }

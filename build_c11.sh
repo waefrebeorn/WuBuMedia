@@ -50,6 +50,9 @@ echo "  wubu_rvc.c        OK"
 $CC $CFLAGS -c src/wubu_rvc_parity.c -o build/wubu_rvc_parity.o -lsqlite3 -lm 2>&1
 echo "  wubu_rvc_parity.c OK"
 
+$CC $CFLAGS -c src/wubu_rcu.c -o build/wubu_rcu.o 2>&1
+echo "  wubu_rcu.c         OK"
+
 $CC $CFLAGS -c src/wubu_buddy.c  -o build/wubu_buddy.o -lsqlite3 -lm 2>&1
 echo "  wubu_buddy.c      OK"
 
@@ -72,12 +75,25 @@ echo "=== Building executables ==="
 $CC $CFLAGS -DWUBU_DAEMON_MAIN src/wubu_daemon.c src/wubu_wiki.c -lsqlite3 -o build/wubu_daemon.exe 2>&1
 echo "  wubu_daemon.exe   OK"
 
-# WuBuVoice application (real-time voice changer)
-$CC $CFLAGS src/wubuvc.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_buddy.c src/wubu_rlm.c -lsqlite3 -lm -o build/wubuvc.exe 2>&1
+$CC $CFLAGS -c src/wubu_rcu.c -o build/wubu_rcu.o 2>&1
+echo "  wubu_rcu.c        OK"
+
+# WuBu model detector tool (drag-drop file analysis)
+$CC $CFLAGS src/wubu_detect.c -I src -lm -o build/wubu_detect.exe 2>&1
+echo "  wubu_detect.exe  OK"
+
+# WuBu model dock object
+$CC $CFLAGS -c src/wubu_model_dock.c -I src -lm -o build/wubu_model_dock.o 2>&1
+
+$CC $CFLAGS -c src/wubu_wubu.c -I src -lsqlite3 -lm -o build/wubu_wubu.o 2>&1
+echo "  wubu_wubu.c       OK"
+
+# WuBuVoice CLI (with RCU hot-swap + model dock + training)
+$CC $CFLAGS src/wubuvc.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rcu.c src/wubu_model_dock.c src/wubu_wubu.c src/wubu_buddy.c src/wubu_rlm.c -I src -lsqlite3 -lm -o build/wubuvc.exe 2>&1
 echo "  wubuvc.exe        OK"
 
-# WuBuVoice GUI (Win32 GUI app, no console)
-$CC $CFLAGS -municode src/wubugui.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_buddy.c src/wubu_rlm.c -lsqlite3 -lm -lgdi32 -lcomctl32 -luser32 -o build/wubugui.exe 2>&1
+# WuBuVoice GUI (Win32 GUI app — with RCU + model dock + training)
+$CC $CFLAGS -municode src/wubugui.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rcu.c src/wubu_model_dock.c src/wubu_wubu.c src/wubu_buddy.c src/wubu_rlm.c -I src -lsqlite3 -lm -lgdi32 -lcomctl32 -luser32 -lcomdlg32 -o build/wubugui.exe 2>&1
 echo "  wubugui.exe       OK"
 
 if [ "$1" = "test" ]; then
@@ -107,14 +123,17 @@ if [ "$1" = "test" ]; then
     $CC $CFLAGS src/test_sica.c src/wubu_sica.c -lsqlite3 -o build/test_sica.exe 2>&1
     echo "  test_sica.exe     OK"
 
-    $CC $CFLAGS src/test_rvc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rlm.c -lsqlite3 -lm -o build/test_rvc.exe 2>&1
-    echo "  test_rvc.exe      OK"
+    $CC $CFLAGS src/test_rvc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rcu.c src/wubu_wubu.c src/wubu_rlm.c src/wubu_buddy.c -I src -lsqlite3 -lm -o build/test_rvc.exe 2>&1
+    echo "  test_rvc.exe       OK"
 
-    $CC $CFLAGS src/test_vc.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rlm.c src/wubu_buddy.c -lsqlite3 -lm -o build/test_vc.exe 2>&1
-    echo "  test_vc.exe       OK"
+    $CC $CFLAGS src/test_vc.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rcu.c src/wubu_wubu.c src/wubu_buddy.c src/wubu_rlm.c -I src -lsqlite3 -lm -o build/test_vc.exe 2>&1
+    echo "  test_vc.exe      OK"
 
-    $CC $CFLAGS src/test_quality.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rlm.c src/wubu_buddy.c -lsqlite3 -lm -o build/test_quality.exe 2>&1
+    $CC $CFLAGS src/test_quality.c src/wubu_vc.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_rcu.c src/wubu_wubu.c src/wubu_rlm.c src/wubu_buddy.c -lsqlite3 -lm -o build/test_quality.exe 2>&1
     echo "  test_quality.exe  OK"
+
+    $CC $CFLAGS src/test_rcu.c src/wubu_rcu.c src/wubu_rvc.c src/wubu_rvc_parity.c src/wubu_wubu.c -I src -lsqlite3 -lm -o build/test_rcu.exe 2>&1
+    echo "  test_rcu.exe      OK"
 
     echo ""
     echo "=== Running all tests ==="
@@ -148,6 +167,10 @@ if [ "$1" = "test" ]; then
     echo "=== WuBuVoice Quality Comparison Suite ==="
     rm -f /tmp/test_quality*
     ./build/test_quality.exe || true
+
+    echo "=== WuBuRVC RCU Hot-Swap Test Suite ==="
+    rm -f /tmp/test_rcu*
+    ./build/test_rcu.exe || true
 fi
 
 echo ""
