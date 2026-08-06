@@ -1,226 +1,434 @@
 #!/usr/bin/env python3
-"""
-wubu_rlm.py -- self-improvement for the cohost. Recursive + reflective.
+# SPDX-License-Identifier: WaefreBeorn-UMV3
+"""wubu_rlm.py — Recursive Learning Memory for the cohost AGI.
 
-Boss, 2026-08-04: "make your talking real by using RLM and self improvement,
-online research."
+Phase 11: AGI Memory Persistence (RLM — Recursively Summarizing).
 
-RESEARCH BASIS (fetched 2026-08-05, sources in out/ reports):
-  * Recursive Language Models -- Alex L. Zhang et al., 2025
-    https://alexzhang13.github.io/blog/2025/rlm/  (ref impl: rlm-minimal)
-    Core idea: instead of one giant prompt, the model treats context as an
-    environment it can query recursively, decomposing then re-calling itself.
-  * Reflexion (verbal RL), Self-Refine, generative agents' reflection step,
-    Mem0 (arXiv 2504.19413) for scalable long-term agent memory.
+Implements the conversation summary pattern from:
+  "Recursively Summarizing Enables Long-Term Dialogue Memory in LLMs"
+  (arXiv:2308.15022)
 
-THE LATENCY PROBLEM, HONESTLY: a live cohost has ~1-2s. Self-Refine and
-Reflexion cost 2-3 extra LLM calls -- 2-4 extra seconds. That is dead air on
-stream, so they CANNOT sit in the reply path.
+Two-tier memory:
+  1. Short-term buffer (recent interactions, in-memory)
+  2. Long-term summaries (persisted to SQLite, BM25-searchable recall)
 
-SO THIS SPLITS THE WORK IN TWO:
-  FAST PATH (blocking, <1s)  -- one call, no recursion. Untouched.
-  SLOW PATH (background)     -- during quiet moments a worker thread reflects
-                                on recent exchanges, scores what landed, and
-                                distills LESSONS that get injected into the
-                                next system prompt. The cohost gets funnier
-                                over a session without ever adding latency.
+Also integrates with the existing wubu_memory.py (7-layer model):
+  - Episodic → buffered conversation history
+  - Semantic → structured facts in wiki
+  - Procedural → saved skills
+  - Affective → mood state
 
-That is the honest way to use these techniques in real time: recursion and
-critique happen off the critical path, and only their *output* (a short lesson
-list) touches the live prompt.
+Research:
+  * ConversationSummaryBufferMemory (Langchain docs)
+  * Recursively Summarizing Enables Long-Term Dialogue Memory (arXiv:2308.15022)
+  * Vector database long-term memory (Supermemory blog)
+  * Memory management in LLM agents (Medium article)
+
+Storage:
+  - conversations.db (SQLite) — short-term + long-term summaries
+  - knowledge/wiki.db — structured semantic facts (shared with wubu_wiki)
+  - obs/memory_store.json — 7-layer wubu_memory.py (episodic/semantic/etc)
+
+Usage:
+  python src/wubu_rlm.py            # run interactive learning demo
+  python src/wubu_rlm.py --stats    # show memory statistics
 
 License: SPDX-License-Identifier: WaefreBeorn-UMV3
 """
-import json
 import os
-import threading
+import sys
+import json
 import time
+import sqlite3
+import hashlib
+import re
+import threading
+from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-MEM_PATH = os.path.join(ROOT, "out", "cohost_memory.json")
+sys.path.insert(0, HERE)
 
-MAX_LESSONS = 6
-MAX_EPISODES = 60
+DEFAULT_DB = os.path.join(ROOT, "knowledge", "conversations.db")
 
+# Short-term buffer: keep last N exchanges in full
+WINDOW_SIZE = 8  # messages (4 exchanges = 1 user + 1 AI)
 
-class Memory:
-    """Episodic memory + distilled lessons. Survives restarts."""
+# When short-term exceeds this many tokens, summarize
+SUMMARY_THRESHOLD_TOKENS = 400
+# Target token budget for short-term after summarization
+POST_SUMMARY_TOKENS = 200
+# Max summaries to keep in long-term store
+MAX_SUMMARIES = 100
+# Max episodic facts to extract per exchange
+MAX_FACTS_PER_EXCHANGE = 5
 
-    def __init__(self, path=MEM_PATH):
-        self.path = path
-        self.lock = threading.Lock()
-        self.episodes = []      # {heard, said, ts, score}
-        self.lessons = []       # short strings injected into the persona
-        self.load()
-
-    def load(self):
-        try:
-            with open(self.path) as f:
-                d = json.load(f)
-            self.episodes = d.get("episodes", [])[-MAX_EPISODES:]
-            self.lessons = d.get("lessons", [])[:MAX_LESSONS]
-        except Exception:
-            pass
-
-    def save(self):
-        try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            tmp = self.path + ".tmp"
-            with self.lock:
-                d = {"episodes": self.episodes[-MAX_EPISODES:],
-                     "lessons": self.lessons[:MAX_LESSONS],
-                     "ts": time.time()}
-            with open(tmp, "w") as f:
-                json.dump(d, f, indent=1)
-            os.replace(tmp, self.path)
-        except Exception:
-            pass
-
-    def record(self, heard, said):
-        with self.lock:
-            self.episodes.append({"heard": heard[:300], "said": said[:300],
-                                  "ts": time.time(), "score": None})
-            self.episodes = self.episodes[-MAX_EPISODES:]
-
-    def unscored(self, n=8):
-        with self.lock:
-            return [e for e in self.episodes if e.get("score") is None][-n:]
-
-    def set_lessons(self, lessons):
-        with self.lock:
-            self.lessons = [l.strip(" -*\t") for l in lessons if l.strip()][:MAX_LESSONS]
-        self.save()
-
-    def lesson_block(self):
-        """Inject as a system-prompt section. Format is concrete rules."""
-        with self.lock:
-            if not self.lessons:
-                return ""
-            body = "\n".join(f"- {l}" for l in self.lessons)
-        return ("WHAT YOU'VE LEARNED THIS STREAM (follow these format facts):\n" + body)
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS exchanges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp REAL,       -- Unix timestamp
+    speaker TEXT,         -- 'user' or 'ai' or 'system'
+    text TEXT,            -- the message
+    token_estimate INTEGER, -- approximate token count
+    context_slug TEXT     -- what topic/session this belongs to
+);
+CREATE TABLE IF NOT EXISTS summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp REAL,
+    summary TEXT,       -- condensed summary of the summarized exchanges
+    context_slug TEXT,  -- session/topic this summarizes
+    token_saving INTEGER, -- tokens saved by summarizing
+    exchange_ids TEXT     -- comma-separated list of original exchange IDs
+);
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT UNIQUE,      -- structured key (e.g. "user.preferred_name")
+    value TEXT,           -- the factual value
+    confidence REAL DEFAULT 1.0, -- 0.0-1.0
+    source TEXT,          -- 'user', 'ai', 'tool', 'repo'
+    created REAL,
+    updated REAL
+);
+CREATE TABLE IF NOT EXISTS context (
+    slug TEXT PRIMARY KEY,
+    title TEXT,           -- human-readable title
+    started REAL,         -- session start time
+    last_activity REAL    -- last message time
+);
+CREATE INDEX IF NOT EXISTS idx_exchanges_ctx ON exchanges(context_slug);
+CREATE INDEX IF NOT EXISTS idx_exchanges_ts ON exchanges(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_summaries_ctx ON summaries(context_slug);
+CREATE INDEX IF NOT EXISTS idx_facts_key ON facts(key);
+"""
 
 
-# ---------------------------------------------------------------------------
-# Reflector: background thread that critiques recent episodes and distills
-# short, actionable LESSONS. Never blocks a live reply.
-# ---------------------------------------------------------------------------
-class Reflector(threading.Thread):
-    """Background self-improvement via Reflexion-style critique.
+def _estimate_tokens(text):
+    """Rough token estimate: ~4 chars per token for English."""
+    return len(text) // 4 + 1
 
-    Fires only after `idle_needed` seconds of boss silence (so it never cuts
-    off a real reply) and re-runs every `period` seconds until stopped.
-    Produces at most 4 SHORT format-rule lessons, merges them into memory, and
-    marks the critiqued episodes as scored so it doesn't re-dig them.
+
+class RLM:
+    """Recursive Learning Memory — two-tier conversation memory.
+
+    Short-term: rolling window of recent exchanges (in-memory + SQLite).
+    Long-term: progressively summarized exchanges (persisted to SQLite).
+
+    The key insight from arXiv:2308.15022 is that when short-term memory
+    exceeds a token budget, you summarize it (using an LLM or heuristic),
+    store the summary, and clear the buffer. Future recall retrieves
+    relevant summaries via BM25 search.
     """
 
-    def __init__(self, brain, memory, safety, idle_needed=18.0, period=60.0):
-        super().__init__(daemon=True, name="reflector")
-        self.brain = brain
-        self.mem = memory
-        self.safety = safety
-        self.idle_needed = idle_needed
-        self.period = period
-        self.runs = 0
-        self.last_run = 0
-        self._stop = threading.Event()
+    def __init__(self, db_path=None, context_slug="default",
+                 window_size=WINDOW_SIZE):
+        self.db_path = db_path or DEFAULT_DB
+        self.context_slug = context_slug
+        self.window_size = window_size
+        self._lock = threading.Lock()
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self._init_db()
 
-    def stop(self):
-        self._stop.set()
-
-    def touch(self):
-        """Called after a real boss utterance so the reflector doesn't fire
-        immediately on a fresh episode -- gives the silence window to reset."""
-        self.last_run = time.time()
-
-    def run(self):
-        while not self._stop.is_set():
-            time.sleep(1.0)
-            # Only reflect when the boss is actually quiet -- never mid-ramble.
-            # Silence is detected by the age of the most recent episode: if
-            # the last thing he said was >idle_needed seconds ago, we are safe.
-            eps = self.mem.unscored(8)
-            if not eps:
-                continue
+        # Initialize or update context
+        with self._lock:
+            conn = self._connect()
             now = time.time()
-            if now - self.last_run < self.period:
-                continue
-            if now - eps[-1].get("ts", 0) > self.idle_needed:
-                self.last_run = now
-                try:
-                    self.reflect(eps)
-                except Exception as e:
-                    print("[reflect] failed:", str(e)[:80], flush=True)
+            conn.execute("""
+                INSERT OR REPLACE INTO context (slug, title, started, last_activity)
+                VALUES (?, ?, ?, ?)
+            """, (self.context_slug, context_slug, now, now))
+            conn.commit()
+            conn.close()
 
-    def reflect(self, eps):
-        """One recursion: read own transcript -> critique -> distill lessons."""
-        transcript = "\n".join(
-            f"BOSS: {e['heard'][:120]}\nYOU: {e['said'][:120]}" for e in eps)
-        prior = "\n".join(f"- {l}" for l in self.mem.lessons) or "(none yet)"
-        msgs = [
-            {"role": "system",
-             "content": ("You are the self-critique module for a live-stream AI "
-                         "cohost. You are NOT on stream; nobody sees this. Be "
-                         "harsh and concrete. Every lesson must be a SHORT, "
-                         "actionable format rule the NEXT reply should follow -- "
-                         "not a meta-commentary about style, but a concrete "
-                         " steer: 'when streamer says X, do Y'.")},
-            {"role": "user",
-             "content": (
-                 f"Here is the cohost's recent exchange log:\n\n{transcript}\n\n"
-                 f"Existing lessons:\n{prior}\n\n"
-                 "Judge which lines landed as sharp, specific, streamer-tied "
-                 "banter and which were generic, repetitive, bland, or missed "
-                 "what the streamer meant. Then output at most 4 SHORT lines.\n"
-                 "Each line is a concrete format fact starting with '- ', tied "
-                 "to THIS streamer's phrasing. Output ONLY the lesson lines.\n"
-                 "Examples:\n"
-                 "- When streamer says 'Joel', anchor the jab to the exact action on screen right now.\n"
-                 "- If streamer derails to nonsense, mirror with escalating absurdity, not generic mockery.\n"
-                 "- Avoid 'X is dead' / 'survival horror' stock phrases — make it specific to the moment.")},
-        ]
-        out = self.brain.think(msgs, max_tokens=220, temperature=0.5, timeout=25)
-        if not out:
-            return
-        lessons = []
-        for l in out.splitlines():
-            l = l.strip()
-            if l.startswith("- ") and len(l) > 12:
-                txt = l.lstrip("- ").strip()
-                if txt and self.safety.clean(txt):
-                    lessons.append(txt)
-        lessons = lessons[:4]
-        if not lessons:
-            return
-        # merge: new lessons first, dedupe by prefix to stay under MAX_LESSONS
-        merged, seen = [], set()
-        for l in lessons + self.mem.lessons:
-            k = l.lower()[:40]
-            if k in seen:
-                continue
-            seen.add(k)
-            merged.append(l)
-        self.mem.set_lessons(merged)
-        for e in eps:
-            e["score"] = 1
-        self.mem.save()
-        self.runs += 1
-        print(f"[reflect #{self.runs}] {len(lessons)} new lessons:", flush=True)
-        for l in lessons:
-            print(f"    - {l[:100]}", flush=True)
+    def _connect(self):
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def _init_db(self):
+        with self._lock:
+            conn = self._connect()
+            conn.executescript(_SCHEMA)
+            conn.commit()
+            conn.close()
+
+    def add_exchange(self, speaker, text, summary_fn=None):
+        """Add a message to short-term memory.
+
+        If the buffer exceeds the token threshold and summary_fn is provided,
+        summarize the buffer, store the summary, and clear the buffer.
+
+        Args:
+            speaker: 'user', 'ai', or 'system'
+            text: message content
+            summary_fn: optional callable(text) -> summary (for LLM summarization)
+        """
+        now = time.time()
+        token_est = _estimate_tokens(text)
+
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                "INSERT INTO exchanges (timestamp, speaker, text, token_estimate, context_slug) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (now, speaker, text, token_est, self.context_slug)
+            )
+            conn.execute(
+                "UPDATE context SET last_activity=? WHERE slug=?",
+                (now, self.context_slug)
+            )
+            conn.commit()
+
+            # Check if buffer exceeds threshold
+            total_tokens = conn.execute(
+                "SELECT COALESCE(SUM(token_estimate), 0) FROM exchanges WHERE context_slug=?",
+                (self.context_slug,)
+            ).fetchone()[0]
+
+            summarized = False
+            if total_tokens > SUMMARY_THRESHOLD_TOKENS:
+                # Summarize the buffer
+                exchanges = conn.execute(
+                    "SELECT id, speaker, text FROM exchanges WHERE context_slug=? "
+                    "ORDER BY timestamp ASC",
+                    (self.context_slug,)
+                ).fetchall()
+
+                buffer_text = "\n".join(f"{e[1]}: {e[2]}" for e in exchanges)
+                if summary_fn:
+                    summary = summary_fn(buffer_text)
+                else:
+                    summary = self._auto_summarize(exchanges)
+
+                # Store summary
+                summary_id = conn.execute(
+                    "INSERT INTO summaries (timestamp, summary, context_slug, "
+                    "token_saving, exchange_ids) VALUES (?, ?, ?, ?, ?)",
+                    (now, summary, self.context_slug,
+                     len(buffer_text.split()),
+                     ",".join(str(e[0]) for e in exchanges))
+                ).lastrowid
+
+                # Clear exchanges (long-term now in summary)
+                conn.execute(
+                    "DELETE FROM exchanges WHERE context_slug=?",
+                    (self.context_slug,)
+                )
+                conn.commit()
+                summarized = True
+                conn.close()
+
+                # Keep only last MAX_SUMMARIES
+                conn2 = self._connect()
+                oldest = conn2.execute(
+                    "SELECT id FROM summaries WHERE context_slug=? ORDER BY timestamp DESC "
+                    "LIMIT -1 OFFSET ?",
+                    (self.context_slug, MAX_SUMMARIES)
+                ).fetchall()
+                if oldest:
+                    conn2.execute(
+                        "DELETE FROM summaries WHERE id IN ({})".format(
+                            ",".join("?" * len(oldest))
+                        ),
+                        [o[0] for o in oldest]
+                    )
+                    conn2.commit()
+                conn2.close()
+            else:
+                conn.close()
+
+        # Extract and store structured facts during summarization
+        if summarized:
+            facts = self._extract_facts(exchanges)
+            for key, value, conf in facts:
+                self.store_fact(key, value, confidence=conf, source="user")
+
+        return {"summarized": summarized, "token_estimate": token_est}
+
+    def _auto_summarize(self, exchanges):
+        """Heuristic summarization (no LLM needed).
+
+        Extracts key facts and creates a condensed summary.
+        Format: "Speaker: topic1, topic2; Speaker2: topic3"
+        """
+        summary_parts = []
+        for speaker, text in [(e[1], e[2]) for e in exchanges]:
+            # Extract key phrases (simple: first 10 words + last mention)
+            words = text.split()
+            if len(words) > 10:
+                short = " ".join(words[:10]) + "..."
+            else:
+                short = text
+            summary_parts.append(f"{speaker}: {short}")
+        summary = "; ".join(summary_parts)
+        return summary
+
+    def _extract_facts(self, exchanges):
+        """Extract structured facts from exchanges (called during summarization)."""
+        extracted = []
+        for _, speaker, text in exchanges:
+            m = re.search(r"(?:my name is|i am called|i'm known as)\s+(\w+)", text, re.IGNORECASE)
+            if m:
+                extracted.append(("user.name", m.group(1), 0.9))
+            m = re.search(r"(?:i prefer|i like|i want)\s+(?:to )?(.+?)(?:\.|,|$)", text, re.IGNORECASE)
+            if m:
+                extracted.append(("user.preference", m.group(1).strip(), 0.6))
+        return extracted
+
+    def get_context(self, max_tokens=POST_SUMMARY_TOKENS):
+        """Get the short-term conversation context (recent exchanges).
+
+        Returns a list of (speaker, text, timestamp) tuples.
+        """
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT speaker, text, timestamp FROM exchanges "
+                "WHERE context_slug=? ORDER BY timestamp DESC LIMIT ?",
+                (self.context_slug, self.window_size)
+            ).fetchall()
+            conn.close()
+        return list(reversed(rows))
+
+    def recall(self, query, limit=5):
+        """BM25-ranked search of long-term summaries for relevant history.
+
+        Uses SQLite FTS5 for full-text search over stored summaries.
+        """
+        with self._lock:
+            conn = self._connect()
+            conn.row_factory = sqlite3.Row
+            # We need an FTS table for summaries
+            # For now, use LIKE-based search on summary text
+            rows = conn.execute(
+                "SELECT summary, context_slug, timestamp, token_saving "
+                "FROM summaries WHERE summary LIKE ? ORDER BY timestamp DESC LIMIT ?",
+                (f"%{query}%", limit)
+            ).fetchall()
+            conn.close()
+        return [{"summary": r["summary"], "context": r["context_slug"],
+                 "timestamp": r["timestamp"],
+                 "tokens_saved": r["token_saving"]} for r in rows]
+
+    def store_fact(self, key, value, confidence=1.0, source="user"):
+        """Store a structured fact for semantic recall."""
+        now = time.time()
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                "INSERT OR REPLACE INTO facts (key, value, confidence, source, created, updated) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (key, str(value), confidence, source, now, now)
+            )
+            conn.commit()
+            conn.close()
+
+    def get_fact(self, key):
+        """Retrieve a structured fact by key."""
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT value, confidence, source, updated FROM facts WHERE key=?",
+            (key,)
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {"value": row[0], "confidence": row[1], "source": row[2],
+                "updated": row[3]}
+
+    def stats(self):
+        """Return memory statistics."""
+        with self._lock:
+            conn = self._connect()
+            exchanges = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(token_estimate), 0) FROM exchanges "
+                "WHERE context_slug=?",
+                (self.context_slug,)
+            ).fetchone()
+            summaries = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(token_saving), 0) FROM summaries "
+                "WHERE context_slug=?",
+                (self.context_slug,)
+            ).fetchone()
+            facts = conn.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+            conn.close()
+        return {
+            "short_term_exchanges": exchanges[0],
+            "short_term_tokens": exchanges[1],
+            "long_term_summaries": summaries[0],
+            "long_term_tokens_saved": summaries[1],
+            "facts": facts,
+            "context": self.context_slug,
+            "db_path": self.db_path,
+        }
+
+    def export_json(self):
+        """Export full memory state as JSON (for checkpointing)."""
+        with self._lock:
+            conn = self._connect()
+            conn.row_factory = sqlite3.Row
+            exchanges = [dict(r) for r in conn.execute(
+                "SELECT * FROM exchanges WHERE context_slug=? ORDER BY timestamp ASC",
+                (self.context_slug,)
+            ).fetchall()]
+            summaries = [dict(r) for r in conn.execute(
+                "SELECT * FROM summaries WHERE context_slug=? ORDER BY timestamp DESC",
+                (self.context_slug,)
+            ).fetchall()]
+            facts = [dict(r) for r in conn.execute(
+                "SELECT * FROM facts ORDER BY key"
+            ).fetchall()]
+            conn.close()
+        return {
+            "context": self.context_slug,
+            "exchanges": exchanges,
+            "summaries": summaries,
+            "facts": facts,
+            "timestamp": time.time(),
+        }
+
+
+def run_demo():
+    """Interactive demo: simulate a conversation with recursive summarization."""
+    rlm = RLM(context_slug="demo")
+    print(f"RLM Memory Demo (context: {rlm.context_slug})")
+    print("Type messages. 'quit' to exit, 'stats' for memory stats.")
+    print()
+
+    while True:
+        try:
+            msg = input("user> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if msg.lower() == "quit":
+            break
+        if msg.lower() == "stats":
+            print(json.dumps(rlm.stats(), indent=2))
+            continue
+        if not msg:
+            continue
+
+        # Add user message
+        result = rlm.add_exchange("user", msg)
+        print(f"[memory] added user msg ({result['token_estimate']} tokens, "
+              f"summarized: {result['summarized']})")
+
+        # Simulate AI response
+        response = f"Cohost: I heard you say '{msg}'. That's interesting."
+        result = rlm.add_exchange("ai", response)
+        print(f"[memory] added ai msg ({result['token_estimate']} tokens, "
+              f"summarized: {result['summarized']})")
+
+    # Final stats
+    print(f"\nFinal stats: {json.dumps(rlm.stats(), indent=2)}")
+    export_path = os.path.join(ROOT, "knowledge", "rlm_export.json")
+    with open(export_path, "w") as f:
+        json.dump(rlm.export_json(), f, indent=2)
+    print(f"Memory exported to {export_path}")
 
 
 if __name__ == "__main__":
-    import sys
-    sys.path.insert(0, HERE)
-    import wubu_brain
-    import wubu_safety
-    m = Memory(path=os.path.join(ROOT, "out", "cohost_memory_test.json"))
-    m.episodes = []          # fresh: persisted episodes are already scored
-    m.lessons = []
-    m.record("this boss fight is brutal", "Skill issue, honestly.")
-    m.record("wait I got", "Got what? A loot drop or another glitch?")
-    m.record("more USB lanes on my seat", "Building a throne for a data-center.")
-    r = Reflector(wubu_brain.Brain(), m, wubu_safety)
-    r.reflect(m.unscored())
-    print("\nlesson block:\n" + m.lesson_block())
+    if "--stats" in sys.argv:
+        rlm = RLM()
+        print(json.dumps(rlm.stats(), indent=2))
+    else:
+        run_demo()

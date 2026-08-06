@@ -1,0 +1,60 @@
+{
+  "context": "demo",
+  "exchanges": [
+    {
+      "id": 10,
+      "timestamp": 1785975659.4529119,
+      "speaker": "ai",
+      "text": "Cohost: I heard you say 'another message here to push past the threshold and make sure that the system properly summarizes the buffer'. That's interesting.",
+      "token_estimate": 39,
+      "context_slug": "demo"
+    },
+    {
+      "id": 11,
+      "timestamp": 1785975659.4605992,
+      "speaker": "user",
+      "text": "and one more to make sure it summarizes properly and store facts about the user",
+      "token_estimate": 20,
+      "context_slug": "demo"
+    },
+    {
+      "id": 12,
+      "timestamp": 1785975659.4706938,
+      "speaker": "ai",
+      "text": "Cohost: I heard you say 'and one more to make sure it summarizes properly and store facts about the user'. That's interesting.",
+      "token_estimate": 32,
+      "context_slug": "demo"
+    }
+  ],
+  "summaries": [
+    {
+      "id": 1,
+      "timestamp": 1785975659.3995438,
+      "summary": "user: hello my name is waefrebeorn; ai: Cohost: I heard you say 'hello my name is waefrebeorn'....; user: i prefer quiet nights and indie games and deep learning...; ai: Cohost: I heard you say 'i prefer quiet nights and...; user: let me test the memory system with longer messages to...; ai: Cohost: I heard you say 'let me test the memory...; user: this is a longer message with more tokens to trigger...; ai: Cohost: I heard you say 'this is a longer message...; user: another message here to push past the threshold and make...",
+      "context_slug": "demo",
+      "token_saving": 145,
+      "exchange_ids": "1,2,3,4,5,6,7,8,9"
+    }
+  ],
+  "facts": [
+    {
+      "id": 2,
+      "key": "user.name",
+      "value": "waefrebeorn",
+      "confidence": 0.9,
+      "source": "user",
+      "created": 1785975659.4297507,
+      "updated": 1785975659.4297507
+    },
+    {
+      "id": 4,
+      "key": "user.preference",
+      "value": "quiet nights and indie games and deep learning discussions'",
+      "confidence": 0.6,
+      "source": "user",
+      "created": 1785975659.4468992,
+      "updated": 1785975659.4468992
+    }
+  ],
+  "timestamp": 1785975659.4927611
+}
