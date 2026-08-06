@@ -71,6 +71,11 @@ if "%CMD%"=="agent" (
     goto :eof
 )
 
+if "%CMD%"=="gateway" (
+    "%PYTHON%" "%SRC%\wubu_gateway.py" %*
+    goto :eof
+)
+
 if "%CMD%"=="self" (
     "%PYTHON%" "%SRC%\wubu_self.py" %*
     goto :eof
