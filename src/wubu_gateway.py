@@ -29,6 +29,7 @@ Endpoints:
   GET  /api/wiki/fact?key=... — Get a structured fact
   GET  /api/wiki/article/<slug> — Get a wiki article
   POST /api/wiki/upsert         — Add a wiki article
+  GET  /api/wiki/facts            — All facts (for AGI peer federation)
   GET  /api/capture/devices     — List UVC capture devices
   POST /api/capture/optimize    — Optimize capture card
   GET  /ws                     — WebSocket: real-time face state, hotkeys
@@ -64,6 +65,9 @@ FACE_DIR = os.environ.get("WUBU_FACE_DIR", os.path.join(ROOT, "face"))
 # WebSocket clients (for real-time push)
 _ws_clients = []
 _ws_lock = threading.Lock()
+
+# Global hotkey events buffer (shared between bridge and gateway)
+_hotkey_events = []
 
 
 def _now():
@@ -215,6 +219,22 @@ def _handle_api_get(handler):
         except Exception as e:
             _send_json(handler, {"error": str(e)}, status=500)
 
+    elif path == "/api/wiki/facts":
+        """Export all facts for peer federation (Gold Coast merge protocol)."""
+        try:
+            conn = sqlite3.connect(WIKI_DB)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT key, value, confidence, source_slug FROM facts"
+            ).fetchall()
+            facts = [{"key": r["key"], "value": r["value"],
+                      "confidence": r["confidence"], "source": r["source_slug"]}
+                     for r in rows]
+            conn.close()
+            _send_json(handler, {"count": len(facts), "facts": facts})
+        except Exception as e:
+            _send_json(handler, {"error": str(e)}, status=500)
+
     else:
         _send_error(handler, 404, "not found")
 
@@ -289,10 +309,6 @@ def _handle_api_post(handler, body):
         _send_error(handler, 404, "not found")
 
 
-# Global hotkey events buffer (shared between bridge and gateway)
-_hotkey_events = []
-
-
 class GatewayHandler(BaseHTTPRequestHandler):
     """HTTP handler for the AGI API gateway."""
 
@@ -351,6 +367,7 @@ def run_server(port=PORT):
     print(f"  GET  /api/capture/devices", flush=True)
     print(f"  POST /api/capture/optimize {{format}}", flush=True)
     print(f"  GET  /api/hotkeys", flush=True)
+    print(f"  GET  /api/wiki/facts", flush=True)
     if TOKEN:
         print(f"[gateway] auth: Bearer token required", flush=True)
     else:
