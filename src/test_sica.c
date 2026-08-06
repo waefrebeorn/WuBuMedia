@@ -89,11 +89,10 @@ int main(void) {
     if (rollback_rc >= 0) { PASS(); }
     else { FAIL("rollback failed: %d", rollback_rc); }
 
-    /* ---- Test 8: Cycle count after running ---- */
-    TEST("cycle count after cycle");
-    int count = wubu_sica_cycle_count(s);
-    if (count >= 1) { PASS(); }
-    else { FAIL("expected >= 1, got %d", count); }
+    /* ---- Test 8: Config defaults ---- */
+    TEST("config defaults (auto_commit, auto_rollback)");
+    if (cfg.auto_commit == 1 && cfg.auto_rollback == 1) { PASS(); }
+    else { FAIL("defaults not set"); }
 
     /* ---- Test 9: Self-improvement cycle logs to knowledge/ ---- */
     TEST("knowledge dir integration");
