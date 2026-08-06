@@ -265,6 +265,130 @@ class Wiki:
             conn.commit()
             conn.close()
 
+    def _slug_terms(self, slug):
+        """Build search terms for a slug.
+
+        Returns a list of identifiers that, when found in article content,
+        indicate a cross-reference to this slug. Includes the full slug and
+        the 'core name' (the filename portion after the source-directory
+        prefix, e.g. ``src-wubu_ears`` -> ``wubu_ears``).
+        """
+        terms = [slug]
+        if "-" in slug:
+            core = slug.split("-", 1)[1]
+            if len(core) >= 5:
+                terms.append(core)
+        return terms
+
+    def auto_link(self):
+        """Discover cross-references between articles and create related links.
+
+        Scans every article's content for mentions of other articles' slug
+        identifiers (both full slug and the 'core name' — the filename portion
+        after the source-directory prefix). When a reference is found, a
+        bidirectional ``related`` link is created in the links table.
+
+        This is the wiki equivalent of Obsidian's automatic backlinks:
+        "they're always current because they're derived from the content
+        of every note in your vault."
+
+        Idempotent: existing links are never duplicated.
+
+        Returns the number of new links created.
+        """
+        with self._lock:
+            conn = self._connect()
+
+            # Collect all slugs + content
+            rows = conn.execute(
+                "SELECT slug, content FROM articles"
+            ).fetchall()
+            slugs = [r[0] for r in rows]
+
+            # Build term -> [slugs] mapping (one term may match multiple slugs)
+            term_map = {}
+            for slug in slugs:
+                for term in self._slug_terms(slug):
+                    term_map.setdefault(term, []).append(slug)
+
+            new_links = 0
+            for from_slug, content in rows:
+                for term, targets in term_map.items():
+                    if term == from_slug or term not in content:
+                        continue
+                    for to_slug in targets:
+                        if to_slug == from_slug:
+                            continue
+                        exists = conn.execute(
+                            "SELECT 1 FROM links WHERE from_slug=? AND to_slug=?",
+                            (from_slug, to_slug)
+                        ).fetchone()
+                        if not exists:
+                            conn.execute(
+                                "INSERT INTO links (from_slug, to_slug, kind) "
+                                "VALUES (?, ?, 'related')",
+                                (from_slug, to_slug)
+                            )
+                            # Create reverse link for bidirectional navigation
+                            rev = conn.execute(
+                                "SELECT 1 FROM links WHERE from_slug=? AND to_slug=?",
+                                (to_slug, from_slug)
+                            ).fetchone()
+                            if not rev:
+                                conn.execute(
+                                    "INSERT INTO links (from_slug, to_slug, kind) "
+                                    "VALUES (?, ?, 'related')",
+                                    (to_slug, from_slug)
+                                )
+                            new_links += 1
+
+            conn.commit()
+            conn.close()
+            if new_links > 0:
+                print(f"  [wiki] auto-linked {new_links} cross-references", flush=True)
+            return new_links
+
+    def backlinks(self, slug, limit=50):
+        """Return articles that link *to* the given article (incoming links).
+
+        This is the Obsidian-style 'what links here' / backlink pane.
+        """
+        with self._lock:
+            conn = self._connect()
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT a.slug, a.title, a.tags, l.kind FROM links l "
+                "JOIN articles a ON a.slug = l.from_slug "
+                "WHERE l.to_slug = ? ORDER BY l.kind LIMIT ?",
+                (slug, limit)
+            ).fetchall()
+            conn.close()
+            return [{
+                "from_slug": r["slug"],
+                "title": r["title"],
+                "tags": [t for t in r["tags"].split(",") if r["tags"]] if r["tags"] else [],
+                "kind": r["kind"],
+            } for r in rows]
+
+    def links_for(self, slug, limit=50):
+        """Return articles that this article links *to* (outgoing links)."""
+        with self._lock:
+            conn = self._connect()
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT a.slug, a.title, a.tags, l.kind FROM links l "
+                "JOIN articles a ON a.slug = l.to_slug "
+                "WHERE l.from_slug = ? ORDER BY l.kind LIMIT ?",
+                (slug, limit)
+            ).fetchall()
+            conn.close()
+            return [{
+                "to_slug": r["slug"],
+                "title": r["title"],
+                "tags": [t for t in r["tags"].split(",") if r["tags"]] if r["tags"] else [],
+                "kind": r["kind"],
+            } for r in rows]
+
     def list_articles(self, tag=None, source=None, limit=100):
         """List all articles, optionally filtered by tag or source."""
         conn = self._connect()
@@ -397,6 +521,34 @@ if __name__ == "__main__":
         changed = wiki.learn(slug, content)
         print(f"Learned '{slug}': {'new' if changed else 'already known'}")
 
+    elif len(sys.argv) > 1 and sys.argv[1] == "auto_link":
+        count = wiki.auto_link()
+        total = wiki.stats()["links"]
+        print(f"Created {count} new links ({total} total)")
+
+    elif len(sys.argv) > 1 and sys.argv[1] == "link":
+        # Usage: wubu_wiki.py link <from_slug> <to_slug> [kind]
+        from_slug = sys.argv[2]
+        to_slug = sys.argv[3]
+        kind = sys.argv[4] if len(sys.argv) > 4 else "related"
+        wiki.link(from_slug, to_slug, kind)
+        print(f"Linked: {from_slug} -> {to_slug} ({kind})")
+
+    elif len(sys.argv) > 1 and sys.argv[1] == "backlinks":
+        # Usage: wubu_wiki.py backlinks <slug>
+        bl = wiki.backlinks(sys.argv[2])
+        print(f"Backlinks for '{sys.argv[2]}': {len(bl)}")
+        for b in bl:
+            print(f"  <- {b['from_slug']} ({b['title'][:50]}) [{b['kind']}]")
+
+    elif len(sys.argv) > 1 and sys.argv[1] == "links_for":
+        # Usage: wubu_wiki.py links_for <slug>
+        lf = wiki.links_for(sys.argv[2])
+        print(f"Links from '{sys.argv[2]}': {len(lf)}")
+        for l in lf:
+            print(f"  -> {l['to_slug']} ({l['title'][:50]}) [{l['kind']}]")
+
     else:
-        print("Usage: wubu_wiki.py [search|ingest|stats|fact|upsert|learn] [args]")
+        print("Usage: wubu_wiki.py [search|ingest|stats|fact|upsert|learn|"
+              "auto_link|link|backlinks|links_for] [args]")
         print(f"Stats: {json.dumps(wiki.stats(), indent=2)}")

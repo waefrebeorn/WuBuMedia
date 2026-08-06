@@ -197,8 +197,15 @@ def run_self_check():
         if new_count > 0:
             _log(f"Ingested {new_count} new repo files into wiki")
         summary["checks"]["ingested"] = new_count
+
+        # Check 7: Discover cross-reference links (Obsidian-style backlinks)
+        new_links = wiki.auto_link()
+        if new_links > 0:
+            _log(f"Discovered {new_links} cross-reference links")
+        summary["checks"]["links_new"] = new_links
+        summary["checks"]["links_total"] = wiki.stats()["links"]
     except Exception as e:
-        _log(f"Wiki ingest error: {e}", "WARN")
+        _log(f"Wiki error: {e}", "WARN")
 
     elapsed = time.time() - start
     summary["elapsed_seconds"] = round(elapsed, 2)
