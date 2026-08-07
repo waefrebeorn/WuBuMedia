@@ -191,15 +191,152 @@ int wubu_rvc_load_weights(WuBuRVCModel *model, const char *bin_path) {
     }
 
     /* Set model params.
-     * RVC v2 config: config[16] = hidden_channels (256), config[17] = sample_rate (40000)
-     * We don't store config in WUBU binary — use tensor-shape inference + known values. */
+     * Parse the optional config section at the end of the WUBU binary
+     * (written by tools/extract_rvc_weights.py). */
     model->loaded = 1;
     model->in_memory = 1;
-    /* Hidden channels: 256 for RVC v2 (dec.conv_pre out = hidden*2 for PixelShuffle).
-     * Cartman has dec.conv_pre.weight: (512, 192, 7) -> 512/2 = 256. */
-    if (model->hidden_channels == 0) model->hidden_channels = 256;
-    /* Sample rate: Cartman config[17] = 40000 (40k). Set if not already configured. */
-    if (model->sample_rate == 0 || model->sample_rate == 22050) model->sample_rate = 40000;
+
+    /* After tensor data, read config section if present.
+     * We need to seek past the tensor data to find the config.
+     * The config was already consumed in the loop above, but we can
+     * re-parse it from the buffer. */
+    /* Actually, we'll parse config from the remaining buffer after tensors.
+     * The buffer 'buf' contains the entire file; after the last tensor,
+     * there's [4B config_len][config_data]. */
+    /* Re-derive config position from the loop */
+    /* We already know 'off' after the loop — but it was a local variable.
+     * Instead, let's re-scan the file for the config section. */
+    /* Fallback: infer from tensor shapes + defaults. */
+
+    /* Infer upsample configuration: try config section first,
+     * fall back to inferring from tensor kernel sizes. */
+    /* Try to read config from the file tail */
+    FILE *f2 = fopen(bin_path, "rb");
+    int config_found = 0;
+    if (f2) {
+        fseek(f2, 0, SEEK_END);
+        long fsz = ftell(f2);
+        /* Read last sizeof(uint32_t) for config_len */
+        fseek(f2, fsz - 4, SEEK_SET);
+        uint32_t config_len = 0;
+        if (fread(&config_len, 4, 1, f2) == 1 && config_len > 0 && config_len < 1024) {
+            fseek(f2, fsz - 4 - config_len, SEEK_SET);
+            uint8_t *cfg_buf = (uint8_t *)malloc(config_len);
+            if (cfg_buf && fread(cfg_buf, 1, config_len, f2) == config_len) {
+                size_t coff = 0;
+                while (coff + 5 <= config_len) {
+                    uint8_t field_id = cfg_buf[coff];
+                    uint32_t n_vals = read_u32(cfg_buf + coff + 1);
+                    size_t consumed = 5;
+                    if (field_id == 1 && n_vals > 0 && n_vals <= 8) {
+                        /* upsample_rates */
+                        for (uint32_t v = 0; v < n_vals && v < 8; v++) {
+                            if (coff + 5 + v * 5 >= config_len) break;
+                            uint8_t type = cfg_buf[coff + 5 + v * 5];
+                            int32_t val = (int32_t)read_u32(cfg_buf + coff + 5 + v * 5 + 1);
+                            model->upsample_rates[v] = val;
+                        }
+                        model->n_upsample_layers = (int)n_vals;
+                        consumed = 5 + n_vals * 5;
+                        config_found = 1;
+                    }
+                    if (field_id == 2 && n_vals >= 1) {
+                        if (coff + 6 <= config_len) {
+                            int32_t sr_val = (int32_t)read_u32(cfg_buf + coff + 6);
+                            model->sample_rate = sr_val;
+                            consumed = 6;
+                        }
+                    }
+                    if (field_id == 3 && n_vals >= 1) {
+                        if (coff + 6 <= config_len) {
+                            model->hidden_channels = (int32_t)read_u32(cfg_buf + coff + 6);
+                            consumed = 6;
+                        }
+                    }
+                    if (field_id == 4 && n_vals >= 1) {
+                        if (coff + 6 <= config_len) {
+                            model->mel_channels = (int32_t)read_u32(cfg_buf + coff + 6);
+                            consumed = 6;
+                        }
+                    }
+                    if (field_id == 5 && n_vals >= 1) {
+                        if (coff + 6 <= config_len) {
+                            model->version = (int32_t)read_u32(cfg_buf + coff + 6);
+                            model->version_f = (float)model->version;
+                            consumed = 6;
+                        }
+                    }
+                    coff += consumed;
+                }
+            }
+            free(cfg_buf);
+        }
+        fclose(f2);
+    }
+
+    /* If config wasn't found in the binary, infer from tensor shapes.
+     * ConvTranspose1d weight shape is (in_ch, out_ch, k).
+     * We use kernel size as a proxy: k=16→stride 10, k=4→stride 2. */
+    if (!config_found || model->n_upsample_layers == 0) {
+        int n_ups = 0;
+        for (int i = 0; i < 4 && i < 8; i++) {
+            char key[128];
+            snprintf(key, sizeof(key), "dec.ups.%d.weight_v", i);
+            const RVCTensor *t = wubu_rvc_find_tensor(model, key);
+            if (!t) { snprintf(key, sizeof(key), "dec.ups.%d.weight", i); t = wubu_rvc_find_tensor(model, key); }
+            if (t && t->n_dims >= 3) {
+                int k = t->dims[2];
+                /* Infer stride from kernel size:
+                 * Cartman (40k): k=16→stride=10, k=4→stride=2
+                 * Miku (48k):    k=24→stride=12, k=20→stride=10, k=4→stride=2 */
+                int stride = 1;
+                if (k == 16) stride = 10;
+                else if (k == 24) stride = 12;
+                else if (k == 20) stride = 10;
+                else if (k == 4) stride = 2;
+                else {
+                    /* Generic: try common RVC rates */
+                    /* For non-standard kernels, we cannot infer stride reliably.
+                     * Fall back to channel ratio if applicable. */
+                    int in_ch = t->dims[0];
+                    int out_ch = t->dims[1];
+                    if (in_ch > out_ch && in_ch / out_ch >= 2) stride = in_ch / out_ch;
+                }
+                model->upsample_rates[i] = stride;
+                n_ups++;
+            }
+        }
+        if (n_ups > 0) {
+            model->n_upsample_layers = n_ups;
+            /* Also try kernel size=24 for Miku (48k, k=24→stride=12) */
+            /* Re-check: if k=24, we should have caught it above.
+             * For 48k models: k=[24,20,4,4], rates=[12,10,2,2] */
+        }
+    }
+
+    /* Compute upsample_rate as product of all upsample_rates */
+    int ups_total = 1;
+    int n_ups = model->n_upsample_layers > 0 ? model->n_upsample_layers : 4;
+    for (int i = 0; i < n_ups && i < 8; i++) {
+        if (model->upsample_rates[i] == 0) model->upsample_rates[i] = 1;
+        ups_total *= model->upsample_rates[i];
+    }
+    model->upsample_rate = ups_total;
+
+    /* Hidden channels: dec.conv_pre out channels / 2 (PixelShuffle doubles) */
+    if (model->hidden_channels == 0) {
+        const RVCTensor *cp = wubu_rvc_find_tensor(model, "dec.conv_pre.weight");
+        if (cp && cp->n_dims >= 2) model->hidden_channels = cp->dims[0] / 2;
+        else model->hidden_channels = 256;
+    }
+
+    /* Sample rate: default 40000 for Cartman v2 */
+    if (model->sample_rate == 0 || model->sample_rate == 22050) {
+        model->sample_rate = 40000;
+    }
+
+    /* Mel channels (RVC v2: 80) */
+    if (model->mel_channels == 0) model->mel_channels = 80;
 
     fprintf(stderr, "WuBuRVC: loaded %d/%u tensors from %s (%zu bytes)\n",
             stored, n_tensors, bin_path, (size_t)fsize);

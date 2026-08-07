@@ -795,14 +795,45 @@ int wubu_generator_nsf(WuBuRVCModel *model,
     const RVCTensor *post_w = T(model, "dec.conv_post.weight");
     if (!conv_pre_w || !cond_w || !post_w) return -1;
 
-    int init_ch = conv_pre_w->dims[0]; /* 512 */
-    int n_ups = 4;
-    int ups_in[4] = {init_ch, init_ch / 2, init_ch / 4, init_ch / 8};
-    int ups_out[4] = {init_ch / 2, init_ch / 4, init_ch / 8, init_ch / 16};
-    int ups_rate[4] = {10, 10, 2, 2};
-    int ups_k[4] = {16, 16, 4, 4};
-    int ups_pad[4] = {3, 3, 1, 1};
-    int ups_total = 10 * 10 * 2 * 2; /* 400 */
+    int init_ch = conv_pre_w->dims[0]; /* 512 for Cartman, 768 for some models */
+
+    /* Use model's upsample config if available; fall back to Cartman defaults.
+     * RVC v2 Cartman: rates [10,10,2,2], kernels [16,16,4,4], pad [3,3,1,1]
+     * RVC v2 Miku: rates [12,10,2,2], kernels [24,20,4,4], pad [6,5,1,1]
+     * Infer kernel sizes and pads from weight shapes at runtime. */
+    int n_ups;
+    if (model->n_upsample_layers > 0) n_ups = model->n_upsample_layers;
+    else n_ups = 4;
+
+    int ups_in[8], ups_out[8], ups_rate[8], ups_k[8], ups_pad[8];
+    for (int L = 0; L < n_ups; L++) {
+        ups_in[L] = init_ch / (1 << L);
+        ups_out[L] = init_ch / (1 << (L + 1));
+        if (model->upsample_rates[L] > 0) {
+            ups_rate[L] = model->upsample_rates[L];
+        } else {
+            /* Default: Cartman rates [10, 10, 2, 2] */
+            int def_rates[4] = {10, 10, 2, 2};
+            ups_rate[L] = (L < 4) ? def_rates[L] : 1;
+        }
+        /* Infer kernel size and padding from dec.ups.L.weight_v shape:
+         * weight_v shape is (out_ch, in_ch, k), so k = dims[2].
+         * padding = (k - stride) / 2 (PyTorch ConvTranspose1d default). */
+        char kbuf[128];
+        snprintf(kbuf, sizeof(kbuf), "dec.ups.%d.weight_v", L);
+        const RVCTensor *ut = T(model, kbuf);
+        if (!ut) { snprintf(kbuf, sizeof(kbuf), "dec.ups.%d.weight", L); ut = T(model, kbuf); }
+        if (ut && ut->n_dims >= 3) {
+            ups_k[L] = ut->dims[2];
+            ups_pad[L] = (ut->dims[2] - ups_rate[L]) / 2;
+            if (ups_pad[L] < 0) ups_pad[L] = 0;
+        } else {
+            ups_k[L] = ups_rate[L] * 2;  /* default: k = 2*stride */
+            ups_pad[L] = ups_rate[L] / 2;
+        }
+    }
+    int ups_total = 1;
+    for (int i = 0; i < n_ups; i++) ups_total *= ups_rate[i];
 
     /* ---- conv_pre ---- */
     float *x = (float *)malloc((size_t)init_ch * nF * sizeof(float));

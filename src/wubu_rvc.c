@@ -92,6 +92,11 @@ static int rvc_build_graph(WuBuRVC *rvc) {
     if (rvc->graph.hidden_channels == 0) rvc->graph.hidden_channels = rvc->cfg.hidden_channels;
     if (rvc->graph.n_flow_layers == 0) rvc->graph.n_flow_layers = 4;
     if (rvc->graph.n_upsample_layers == 0) rvc->graph.n_upsample_layers = 4;
+    if (rvc->graph.upsample_rate == 0) {
+        int rates[4] = {10, 10, 2, 2};  /* Cartman default */
+        rvc->graph.upsample_rate = 400;
+        for (int i = 0; i < 4; i++) rvc->graph.upsample_rates[i] = rates[i];
+    }
     if (rvc->graph.n_mrf_stacks == 0) rvc->graph.n_mrf_stacks = 3;
     if (rvc->graph.n_residual_layers == 0) rvc->graph.n_residual_layers = 4;
     if (rvc->graph.mel_channels == 0) rvc->graph.mel_channels = 80;
@@ -393,19 +398,34 @@ WuBuRVC *wubu_rvc_load(const RVCConfig *cfg) {
                 }
             }
             if (!py) py = "python";
+    /* Look for pre-generated .bin — check model_dir and known locations */
             char bin_path[600];
-            /* Look for pre-generated .bin first, then the auto-generated name */
-            const char *bin_candidates[] = {
-                "models/rvc/cartman/cartman_weights.bin",
-                "models/rvc/cartman/EricCartmanV1_e650_s10400.weights.bin",
-                NULL
-            };
+            char bin_candidates[8][600];
+            int n_bins = 0;
+            snprintf(bin_candidates[n_bins++], sizeof(bin_candidates[0]),
+                     "models/rvc/cartman/cartman_weights.bin");
+            snprintf(bin_candidates[n_bins++], sizeof(bin_candidates[0]),
+                     "models/rvc/cartman/EricCartmanV1_e650_s10400.weights.bin");
+            /* Also try model_dir/<basename>.weights.bin */
+            {
+                char model_base[512], *slash;
+                strncpy(model_base, cfg->model_path, sizeof(model_base) - 1);
+                model_base[sizeof(model_base) - 1] = 0;
+                slash = strrchr(model_base, '/');
+                if (slash) {
+                    char dir[512];
+                    size_t dlen = slash - model_base;
+                    snprintf(dir, sizeof(dir), "%.*s", (int)dlen, model_base);
+                    snprintf(bin_candidates[n_bins++], sizeof(bin_candidates[0]),
+                             "%s/%s.weights.bin", dir, slash + 1);
+                }
+            }
             int bin_found = 0;
-            for (int bi = 0; bin_candidates[bi] && !bin_found; bi++) {
+            for (int bi = 0; bi < n_bins && !bin_found; bi++) {
                 FILE *bf = fopen(bin_candidates[bi], "rb");
                 if (bf) { fclose(bf); bin_found = 1;
                     strncpy(bin_path, bin_candidates[bi], sizeof(bin_path) - 1);
-                    bin_path[sizeof(bin_path) - 1] = '\0';
+                    bin_path[sizeof(bin_path) - 1] = 0;
                 }
             }
             if (!bin_found) {
@@ -440,6 +460,10 @@ WuBuRVC *wubu_rvc_load(const RVCConfig *cfg) {
                 rvc->graph.n_residual_layers = rvc->model->n_residual_layers;
                 rvc->graph.sample_rate = rvc->model->sample_rate;
                 rvc->graph.mel_channels = rvc->model->mel_channels;
+                rvc->graph.n_upsample_layers = rvc->model->n_upsample_layers;
+                rvc->graph.upsample_rate = rvc->model->upsample_rate;
+                for (int i = 0; i < 8 && i < rvc->model->n_upsample_layers; i++)
+                    rvc->graph.upsample_rates[i] = rvc->model->upsample_rates[i];
                 fprintf(stderr, "WuBuRVC: loaded model %s (v%d, %d tensors, hidden=%d)\n",
                         cfg->model_path, rvc->model->version,
                         rvc->model->n_tensors, rvc->model->hidden_channels);

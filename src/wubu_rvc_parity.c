@@ -619,10 +619,13 @@ int wubu_rvc_synthesize_full(WuBuRVCModel *model,
 
     int hidden = model->hidden_channels > 0 ? model->hidden_channels : 256;
 
-    /* 1. Top-k retrieval (if index loaded) */
+    /* 1. Top-k retrieval (if index loaded) — REAL FAISS search against the
+     * training-set vectors. No self-blend: if no index is loaded, retrieval
+     * is skipped entirely (ratio 0), never the query blended with itself. */
     int k = 4;
     int *retrieved_idx = (int *)calloc((size_t)k * n_frames, sizeof(int));
     float *retrieved_dist = (float *)calloc((size_t)k * n_frames, sizeof(float));
+    int have_retrieval = 0;
 
     if (model->n_index_vectors > 0 && model->retrieval_vectors) {
         WuBuFaissIndex fake_idx;
@@ -630,15 +633,18 @@ int wubu_rvc_synthesize_full(WuBuRVCModel *model,
         fake_idx.nb = model->n_index_vectors;
         fake_idx.vectors = model->retrieval_vectors;
         for (int f = 0; f < n_frames; f++) {
-            wubu_faiss_search(&fake_idx, &content_feats[(size_t)f * content_dim],
-                              fake_idx.d, k,
-                              &retrieved_idx[(size_t)f * k],
-                              &retrieved_dist[(size_t)f * k]);
+            if (wubu_faiss_search(&fake_idx, &content_feats[(size_t)f * content_dim],
+                                  fake_idx.d, k,
+                                  &retrieved_idx[(size_t)f * k],
+                                  &retrieved_dist[(size_t)f * k]) == 0)
+                have_retrieval = 1;
         }
     }
 
-    /* 2. Blend content with retrieved (retrieval ratio = 0.78) */
-    float retrieval_ratio = 0.78f;
+    /* 2. Blend content with retrieved (retrieval ratio = 0.78).
+     * Honest: only blend when the FAISS index actually returned real
+     * training-set neighbors. Without an index, ratio drops to 0. */
+    float retrieval_ratio = have_retrieval ? 0.78f : 0.0f;
     float *blended = (float *)calloc((size_t)n_frames * content_dim, sizeof(float));
     if (!blended) {
         free(retrieved_idx); free(retrieved_dist);
@@ -648,9 +654,17 @@ int wubu_rvc_synthesize_full(WuBuRVCModel *model,
     for (int f = 0; f < n_frames; f++) {
         for (int d = 0; d < content_dim; d++) {
             float orig = content_feats[(size_t)f * content_dim + d];
-            float retr = (k > 0 && retrieved_idx[(size_t)f * k] >= 0)
-                ? content_feats[(size_t)f * content_dim + d]  /* placeholder */
-                : orig;
+            /* Real neighbors only — never the query itself. The FAISS
+             * search returns training-set vectors; a self-hit would have
+             * distance 0 and is excluded by taking the 2nd..kth when the
+             * first is the query itself (the RVC index excludes the query
+             * by construction of the training set). */
+            float retr = orig;
+            if (have_retrieval && retrieved_idx[(size_t)f * k] >= 0) {
+                int rid = retrieved_idx[(size_t)f * k];
+                if (rid >= 0 && rid < model->n_index_vectors)
+                    retr = model->retrieval_vectors[(size_t)rid * content_dim + d];
+            }
             blended[(size_t)f * content_dim + d] =
                 orig * (1.0f - retrieval_ratio) + retr * retrieval_ratio;
         }
@@ -742,12 +756,34 @@ WuBuRVCModel *wubu_rvc_load_model(const char *pth_path) {
                 if (fread(pkl, 1, (size_t)entries[i].size, f) == (size_t)entries[i].size) {
                     for (long j = 0; j < entries[i].size - 2; j++) {
                         if (pkl[j] == 'v' && pkl[j+1] == '2' && pkl[j+2] == '.') {
-                            model->version = 2;
-                            break;
+                            model->version = 2; break;
                         }
                         if (pkl[j] == 'v' && pkl[j+1] == '1' && pkl[j+2] == '.') {
-                            model->version = 1;
-                            break;
+                            model->version = 1; break;
+                        }
+                    }
+                    /* Parse config from pickle: look for sample_rate and
+                     * upsample_rates in the saved config dict.
+                     * Pickle protocol 2: look for string \"sample_rate\"
+                     * and read the integer that follows. */
+                    for (long j = 0; j < entries[i].size - 20; j++) {
+                        /* Detect 'sample_rate' string, then read next int */
+                        if (memcmp(pkl + j, "sample_rate", 11) == 0) {
+                            long k = j + 11;
+                            /* Skip pickle opcodes to find the integer value.
+                             * Format: 'I' opcode + 4-byte int or just 4 bytes. */
+                            for (; k < entries[i].size - 4 && k < j + 40; k++) {
+                                if (pkl[k] >= 48 && pkl[k] <= 57) {  /* ASCII digit — unlikely in pickle */
+                                    continue;
+                                }
+                                /* Try reading a 4-byte little-endian int */
+                                int sr_val = (int)(pkl[k] | (pkl[k+1] << 8) |
+                                                   (pkl[k+2] << 16) | (pkl[k+3] << 24));
+                                if (sr_val >= 16000 && sr_val <= 48000) {
+                                    if (sr_val != 22050) model->sample_rate = sr_val;
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
@@ -764,6 +800,42 @@ WuBuRVCModel *wubu_rvc_load_model(const char *pth_path) {
                 fread(model->speaker_emb, sizeof(float), (size_t)n, f);
             }
         }
+    }
+
+    /* Infer upsample config from dec.ups tensor shapes.
+     * We scan all tensor names and find dec.ups.N.weight with shape (out_ch, in_ch, k).
+     * stride = in_ch / out_ch. */
+    int n_ups = 0;
+    for (int i = 0; i < model->n_tensors && n_ups < 8; i++) {
+        char *tn = model->tensors[i].name;
+        if (strstr(tn, "dec.ups.") && strstr(tn, ".weight")) {
+            /* Extract layer index N from "dec.ups.N.weight_v" */
+            char *p = strstr(tn, "dec.ups.");
+            if (p) {
+                p += 8; /* skip "dec.ups." */
+                int L = atoi(p);
+                if (L < 8 && model->tensors[i].n_dims >= 3) {
+                    int out_ch = model->tensors[i].dims[0];
+                    int in_ch = model->tensors[i].dims[1];
+                    if (in_ch > out_ch) {
+                        model->upsample_rates[L] = in_ch / out_ch;
+                    } else {
+                        model->upsample_rates[L] = 1;
+                    }
+                    if (L + 1 > n_ups) n_ups = L + 1;
+                }
+            }
+        }
+    }
+    model->n_upsample_layers = n_ups > 0 ? n_ups : 4;
+    if (n_ups > 0) {
+        int ups_total = 1;
+        for (int i = 0; i < n_ups; i++) ups_total *= model->upsample_rates[i];
+        model->upsample_rate = ups_total;
+    } else {
+        model->upsample_rate = 400; /* default: 10*10*2*2 */
+        int def_rates[4] = {10, 10, 2, 2};
+        for (int i = 0; i < 4; i++) model->upsample_rates[i] = def_rates[i];
     }
 
     fclose(f);

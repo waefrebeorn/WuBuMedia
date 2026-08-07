@@ -136,6 +136,8 @@ typedef struct {
     int        hidden_channels;
     int        n_flow_layers;
     int        n_upsample_layers;
+    int        upsample_rates[8];  /* e.g. [10,10,2,2] for 40k, [12,10,2,2] for 48k */
+    int        upsample_rate;      /* product of upsample_rates[] */
     int        n_mrf_stacks;
     int        n_residual_layers;
 } RVCGraph;

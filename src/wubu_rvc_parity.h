@@ -203,6 +203,8 @@ struct WuBuRVCModel {
     int   sample_rate;
     int   mel_channels;
     int   upsample_rate;
+    int   upsample_rates[8];  /* e.g. [10,10,2,2] for 40k Cartman, [12,10,2,2] for 48k Miku */
+    int   n_upsample_layers;
     float version_f;
 
     /* Training provenance (from .wubu meta or inferred from .pth) */
