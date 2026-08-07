@@ -14,11 +14,12 @@
  *
  * Steps (matching Mangio-RVC v23.7.0 infer):
  *   1. load wav -> resample to 16k
- *   2. HuBERT content (v2: layer 12, 768 dim) -> 100 fps frames
- *   3. linear ×2 upsampling of content to 200 fps (278 frames)
- *   4. YIN f0 at 100 fps -> coarse + nsff0, then ×2 nearest to 200 fps
- *   5. wubu_rvc_synthesize_real -> 40k audio
- *   6. write PCM_16 wav
+ *   2. load model (.pth) -> determine version (v1/v2), sample rate, upsample
+ *   3. HuBERT content (v2: layer 12 768-dim, v1: layer 9 + final_proj 256-dim)
+ *   4. linear ×2 upsampling of content to 200 fps
+ *   5. YIN f0 at 100 fps -> coarse + nsff0, then ×2 nearest to 200 fps
+ *   6. wubu_rvc_synthesize_real -> audio at model sample rate
+ *   7. write PCM_16 wav
  *
  * License: WaefreBeorn-UMV3
  */
@@ -147,19 +148,38 @@ static float *upsample_frames(const float *in, int T, int dim, int *T2_out) {
 int main(int argc, char **argv) {
     if (argc < 4) {
         fprintf(stderr,
-                "Usage: %s <input.wav> <model_dir> <output.wav> [--model file.pth]\n",
+                "Usage: %s <input.wav> <model_dir> <output.wav> [--model file.pth]\n"
+                "         [--speaker N] [--noise SCALE] [--hubert PATH]\n"
+                "\n"
+                "         --speaker N   : speaker id for multi-speaker models\n"
+                "         --noise S     : noise scale (0.0 = deterministic, 0.66666 = reference)\n"
+                "         --hubert PATH : override HuBERT weights path\n",
                 argv[0]);
         return 1;
     }
     const char *in_path = argv[1];
     const char *model_dir = argv[2];
     const char *out_path = argv[3];
+    srand((unsigned)time(NULL));  /* seed for NSF noise injection */
     char model_path[1024] = {0};
     char index_path[1024] = {0};
+    char hubert_path[1024] = {0};
+    int speaker_id = 0;       /* default: speaker 0 */
+    float noise_scale = 0.0f; /* default: deterministic (parity mode) */
     snprintf(model_path, sizeof(model_path), "%s/model.pth", model_dir);
     for (int a = 4; a < argc - 1; a++) {
         if (strcmp(argv[a], "--model") == 0) {
             snprintf(model_path, sizeof(model_path), "%s", argv[a + 1]);
+            a++;
+        } else if (strcmp(argv[a], "--speaker") == 0) {
+            speaker_id = atoi(argv[a + 1]);
+            a++;
+        } else if (strcmp(argv[a], "--noise") == 0) {
+            noise_scale = (float)atof(argv[a + 1]);
+            a++;
+        } else if (strcmp(argv[a], "--hubert") == 0) {
+            snprintf(hubert_path, sizeof(hubert_path), "%s", argv[a + 1]);
+            a++;
         }
     }
     if (!strstr(model_path, ".pth")) {
@@ -209,7 +229,7 @@ int main(int argc, char **argv) {
     free(audio);
     if (!pcm16) die("resample failed");
 
-    /* Build config early so HuBERT can use it */
+    /* Build config early so we can load the model and determine version */
     RVCConfig cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.model_path, model_path, sizeof(cfg.model_path) - 1);
@@ -218,37 +238,58 @@ int main(int argc, char **argv) {
     cfg.mel_channels = 80;
     cfg.hidden_channels = 256;
 
-    /* 2. HuBERT content (v2, layer 12) */
+    /* 2. Load model early to determine version (v1 vs v2) */
+    WuBuRVC *rvc = wubu_rvc_load(&cfg);
+    if (!rvc || !wubu_rvc_is_model_loaded(rvc)) die("model load failed");
+
+    /* Determine RVC version from loaded model */
+    int rvc_ver = rvc->rvc_version;
+    if (rvc_ver <= 0) rvc_ver = 2;
+    int content_dim = (rvc_ver == 1) ? 256 : 768;
+    int sr_out = rvc->sample_rate;
+    if (sr_out <= 0) sr_out = 40000;
+    int ups_total = rvc->graph.upsample_rate;
+    if (ups_total <= 0) ups_total = 400;
+    printf("[2] model version: v%d (content_dim=%d, sr=%d, ups=%d)\n",
+           rvc_ver, content_dim, sr_out, ups_total);
+
+    /* 3. HuBERT content (v2: layer 12 768-dim, v1: layer 9 + final_proj 256-dim) */
     WuBuHubert hb;
     memset(&hb, 0, sizeof(hb));
-    if (wubu_hubert_load(&hb, "models/rvc/hubert_weights.bin") != 0)
-        die("hubert weights missing: models/rvc/hubert_weights.bin (run tools/extract_hubert_weights.py)");
+    /* Allow --hubert PATH override; otherwise search model_dir then default */
+    const char *hubert_bin = hubert_path[0] ? hubert_path : "models/rvc/hubert_weights.bin";
+    if (!hubert_path[0]) {
+        char hp[1024];
+        snprintf(hp, sizeof(hp), "%s/hubert_weights.bin", model_dir);
+        FILE *hf = fopen(hp, "rb");
+        if (hf) { fclose(hf); hubert_bin = hp; }
+    }
+    if (wubu_hubert_load(&hb, hubert_bin) != 0)
+        die("hubbert weights missing — run tools/extract_hubert_weights.py or pass --hubert PATH");
     int T = wubu_hubert_output_length(n16);
-    printf("[2] hubert frames: %d\n", T);
-    int content_dim = 768;  /* v2 default; overridden after model load */
+    printf("[3] hubert frames: %d\n", T);
     float *content = (float *)malloc((size_t)T * content_dim * sizeof(float));
     clock_t t0 = clock();
-    int Tc = wubu_hubert_extract_real(&hb, pcm16, n16, 2, content, T * content_dim);
+    int Tc = wubu_hubert_extract_real(&hb, pcm16, n16, rvc_ver, content, T * content_dim);
     printf("     hubert: %.2f s (%.2fx realtime)\n",
            (double)(clock() - t0) / CLOCKS_PER_SEC,
            (double)(clock() - t0) / CLOCKS_PER_SEC / ((double)n16 / 16000.0));
     if (Tc != T) { printf("     (hubert returned %d frames)\n", Tc); T = Tc; }
 
-    /* 3. content ×2 upsample: [T, dim] -> [2T, dim] */
+    /* 4. content ×2 upsample: [T, dim] -> [2T, dim] */
     int T2 = 0;
     float *content_up = upsample_frames(content, T, content_dim, &T2);
     free(content);
-    printf("[3] content_up frames: %d\n", T2);
+    printf("[4] content_up frames: %d\n", T2);
 
-    /* 4. f0 (YIN at 16k, 100 fps) + coarse, then ×2 nearest to 200 fps */
+    /* 5. f0 (YIN at 16k, 100 fps) + coarse, then ×2 nearest to 200 fps */
     int n_f0 = 0;
     float *f0 = (float *)malloc((size_t)(n16 / 160 + 2) * sizeof(float));
     n_f0 = wubu_f0_yin(pcm16, n16, 16000, 1024, 160, 50.0f, 1100.0f, f0, n16 / 160 + 2);
-    printf("[4] yin f0 frames: %d\n", n_f0);
+    printf("[5] yin f0 frames: %d\n", n_f0);
     int *coarse100 = (int *)malloc((size_t)n_f0 * sizeof(int));
     float *nsff0_100 = (float *)malloc((size_t)n_f0 * sizeof(float));
     wubu_f0_to_coarse(f0, n_f0, 50.0f, 1100.0f, coarse100, nsff0_100);
-    /* upsample coarse + nsff0 to 200 fps (nearest) */
     int n_f0_2 = n_f0 * 2;
     int *f0_coarse = (int *)malloc((size_t)n_f0_2 * sizeof(int));
     float *nsff0 = (float *)malloc((size_t)n_f0_2 * sizeof(float));
@@ -259,20 +300,8 @@ int main(int argc, char **argv) {
     }
     free(f0); free(coarse100); free(nsff0_100);
 
-    /* 5. real synth */
-    printf("[5] synth...\n");
-
-    WuBuRVC *rvc = wubu_rvc_load(&cfg);
-    if (!rvc || !wubu_rvc_is_model_loaded(rvc)) die("model load failed");
-
-    /* Use model-inferred sample rate, upsample factor, and content dim */
-    int sr_out = rvc->sample_rate;
-    if (sr_out <= 0) sr_out = 40000;
-    int ups_total = rvc->graph.upsample_rate;
-    if (ups_total <= 0) ups_total = 400;
-    /* Override content_dim from model version */
-    content_dim = (rvc->rvc_version == 1) ? 256 : 768;
-
+    /* 6. real synth */
+    printf("[6] synth...\n");
     int n_frames = T2 < n_f0_2 ? T2 : n_f0_2;
     int max_audio = n_frames * ups_total;
     float *out_audio = (float *)malloc((size_t)max_audio * sizeof(float));
@@ -288,7 +317,7 @@ int main(int argc, char **argv) {
 
     t0 = clock();
     int n_out = wubu_rvc_synthesize_real(rvc->model, cmaj, n_frames, content_dim,
-                                         f0_coarse, nsff0, 0, 0.0f,
+                                         f0_coarse, nsff0, speaker_id, noise_scale,
                                          out_audio, max_audio);
     double synth_s = (double)(clock() - t0) / CLOCKS_PER_SEC;
     if (n_out <= 0) die("synth failed");

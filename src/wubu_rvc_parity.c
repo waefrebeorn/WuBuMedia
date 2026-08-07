@@ -46,6 +46,21 @@ static uint32_t read_u32(const uint8_t *p) {
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* wubu_memmem replacement for MinGW (not available in strict C11) */
+static void *wubu_memmem(const void *h, size_t hl, const void *n, size_t nl) {
+    if (!h || !n || nl == 0 || hl < nl) return NULL;
+    const uint8_t *hay = (const uint8_t *)h;
+    const uint8_t *nee = (const uint8_t *)n;
+    for (size_t i = 0; i <= hl - nl; i++) {
+        size_t j;
+        for (j = 0; j < nl; j++) {
+            if (hay[i + j] != nee[j]) break;
+        }
+        if (j == nl) return (void *)(hay + i);
+    }
+    return NULL;
+}
+
 /* Parse ZIP central directory to find entries in a .pth file.
  * Returns 0 on success, -1 on failure. */
 static int parse_pth_zip(const char *pth_path,
@@ -737,7 +752,7 @@ WuBuRVCModel *wubu_rvc_load_model(const char *pth_path) {
     FILE *f = fopen(pth_path, "rb");
     if (!f) { free(entries); free(model); return NULL; }
 
-    /* Defaults (Mangio-RVC-Fork v2) */
+    /* Defaults (RVC v2 defaults) */
     model->version = 2;
     model->version_f = 2.0;
     model->mel_channels = 80;
@@ -746,43 +761,60 @@ WuBuRVCModel *wubu_rvc_load_model(const char *pth_path) {
     model->n_speakers = 1;
     model->sample_rate = 22050;
     model->n_residual_layers = 4;
+    model->upsample_rate = 400; /* default: 10*10*2*2 */
+    int def_rates[4] = {10, 10, 2, 2};
+    for (int i = 0; i < 4; i++) model->upsample_rates[i] = def_rates[i];
 
-    /* Parse data.pkl for version + tensor keys */
+    /* Parse data.pkl for version, config, and tensor keys */
     for (int i = 0; i < n_entries; i++) {
         if (strstr(entries[i].name, "data.pkl") != NULL) {
             fseek(f, entries[i].offset, SEEK_SET);
             uint8_t *pkl = (uint8_t *)malloc((size_t)entries[i].size);
             if (pkl) {
                 if (fread(pkl, 1, (size_t)entries[i].size, f) == (size_t)entries[i].size) {
-                    for (long j = 0; j < entries[i].size - 2; j++) {
-                        if (pkl[j] == 'v' && pkl[j+1] == '2' && pkl[j+2] == '.') {
-                            model->version = 2; break;
-                        }
-                        if (pkl[j] == 'v' && pkl[j+1] == '1' && pkl[j+2] == '.') {
-                            model->version = 1; break;
+                    /* Version detection via tensor key names in pkl */
+                    if (wubu_memmem(pkl, entries[i].size, "emb_phone.weight", 15) != NULL) {
+                        /* Check TextEncoder768 vs TextEncoder256 in pkl */
+                        if (wubu_memmem(pkl, entries[i].size, "TextEncoder768", 15) != NULL) {
+                            model->version = 2;
+                            model->version_f = 2.0;
+                        } else if (wubu_memmem(pkl, entries[i].size, "TextEncoder256", 15) != NULL ||
+                                   wubu_memmem(pkl, entries[i].size, "TextEncoder", 12) != NULL) {
+                            model->version = 1;
+                            model->version_f = 1.0;
                         }
                     }
-                    /* Parse config from pickle: look for sample_rate and
-                     * upsample_rates in the saved config dict.
-                     * Pickle protocol 2: look for string \"sample_rate\"
-                     * and read the integer that follows. */
-                    for (long j = 0; j < entries[i].size - 20; j++) {
-                        /* Detect 'sample_rate' string, then read next int */
-                        if (memcmp(pkl + j, "sample_rate", 11) == 0) {
-                            long k = j + 11;
-                            /* Skip pickle opcodes to find the integer value.
-                             * Format: 'I' opcode + 4-byte int or just 4 bytes. */
-                            for (; k < entries[i].size - 4 && k < j + 40; k++) {
-                                if (pkl[k] >= 48 && pkl[k] <= 57) {  /* ASCII digit — unlikely in pickle */
-                                    continue;
-                                }
-                                /* Try reading a 4-byte little-endian int */
-                                int sr_val = (int)(pkl[k] | (pkl[k+1] << 8) |
-                                                   (pkl[k+2] << 16) | (pkl[k+3] << 24));
-                                if (sr_val >= 16000 && sr_val <= 48000) {
-                                    if (sr_val != 22050) model->sample_rate = sr_val;
-                                    break;
-                                }
+                    /* Parse config from pickle: look for 'config' key,
+                     * then scan for integer values that form the config list. */
+                    uint8_t *config_key = wubu_memmem(pkl, entries[i].size, "config", 6);
+                    if (config_key) {
+                        /* Scan from config_key for 4-byte little-endian ints
+                         * that look like plausible config values. */
+                        int found = 0;
+                        int32_t vals[20];
+                        for (long j = 0; j < 100 && found < 20 && config_key + j + 4 < pkl + entries[i].size; j++) {
+                            int32_t v = (int32_t)(pkl[j] | (pkl[j+1] << 8) |
+                                                  ((uint32_t)pkl[j+2] << 16) | ((uint32_t)pkl[j+3] << 24));
+                            if (v >= 1 && v <= 48000 && found < 20) {
+                                vals[found++] = v;
+                            }
+                        }
+                        /* Apply config values:
+                         * vals[4] = content_dim (768 for v2, 256 for v1)
+                         * vals[12] = upsample_rates (first value)
+                         * vals[17] = sample_rate
+                         * vals[15] = spk_embed_dim
+                         * vals[16] = hidden_channels */
+                        if (found >= 18) {
+                            if (vals[17] >= 16000 && vals[17] <= 48000) {
+                                model->sample_rate = vals[17];
+                            }
+                            if (vals[4] == 768) { model->version = 2; model->version_f = 2.0; }
+                            else if (vals[4] == 256) { model->version = 1; model->version_f = 1.0; }
+                            if (vals[16] > 0 && vals[16] <= 1024) model->hidden_channels = vals[16];
+                            if (vals[15] > 0 && vals[15] <= 512) {
+                                model->n_speakers = vals[15];
+                                model->has_spk_embed = 1;
                             }
                         }
                     }
@@ -803,25 +835,43 @@ WuBuRVCModel *wubu_rvc_load_model(const char *pth_path) {
     }
 
     /* Infer upsample config from dec.ups tensor shapes.
-     * We scan all tensor names and find dec.ups.N.weight with shape (out_ch, in_ch, k).
-     * stride = in_ch / out_ch. */
+     * For ConvTranspose1d (weight_norm decomposed):
+     * weight_v shape = (out_ch, in_ch, k)
+     * where k = ups_kernel + ups_stride.
+     * Kernel→stride heuristic: k=16→10, k=24→12, k=20→10, k=4→2.
+     * We use pkl data still in memory during the data.pkl parsing loop above. */
     int n_ups = 0;
-    for (int i = 0; i < model->n_tensors && n_ups < 8; i++) {
-        char *tn = model->tensors[i].name;
-        if (strstr(tn, "dec.ups.") && strstr(tn, ".weight")) {
+    for (int i = 0; i < n_entries && n_ups < 8; i++) {
+        if (strstr(entries[i].name, "dec.ups.") && strstr(entries[i].name, "weight")) {
             /* Extract layer index N from "dec.ups.N.weight_v" */
-            char *p = strstr(tn, "dec.ups.");
+            char *p = strstr(entries[i].name, "dec.ups.");
             if (p) {
                 p += 8; /* skip "dec.ups." */
                 int L = atoi(p);
-                if (L < 8 && model->tensors[i].n_dims >= 3) {
-                    int out_ch = model->tensors[i].dims[0];
-                    int in_ch = model->tensors[i].dims[1];
-                    if (in_ch > out_ch) {
-                        model->upsample_rates[L] = in_ch / out_ch;
-                    } else {
-                        model->upsample_rates[L] = 1;
+                if (L < 8 && entries[i].size > 0) {
+                    int kernel_size = 0;
+                    /* Fallback: kernel sizes are typically 4, 16, 20, 24 */
+                    /* We infer stride from the config upsample_kernel_sizes
+                     * which were parsed above if found in config */
+                    if (n_ups <= 0 || model->upsample_kernel_sizes[n_ups-1] > 0) {
+                        /* Use config-derived kernel size if available */
+                        if (n_ups < model->n_upsample_layers && model->upsample_kernel_sizes[L] > 0) {
+                            kernel_size = model->upsample_kernel_sizes[L];
+                        } else {
+                            /* Kernel→stride heuristic based on layer position */
+                            kernel_size = (L == 0 || L == 1) ? 16 : 4;
+                        }
                     }
+                    /* Map kernel size to stride */
+                    int stride;
+                    switch (kernel_size) {
+                        case 16: stride = 10; break;
+                        case 24: stride = 12; break;
+                        case 20: stride = 10; break;
+                        case 4:  stride = 2;  break;
+                        default: stride = kernel_size / 2; break;
+                    }
+                    model->upsample_rates[L] = stride;
                     if (L + 1 > n_ups) n_ups = L + 1;
                 }
             }

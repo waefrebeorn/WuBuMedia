@@ -17,8 +17,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
-/* ═══════════════════════ basic tensor helpers ═══════════════════════ */
+/* Uniform random in [lo, hi) — used for NSF noise injection */
+static inline float wubu_rand_uniform(float lo, float hi) {
+    return lo + (hi - lo) * ((float)rand() / (float)RAND_MAX);
+}
+
+/* ═══════════════════════ basic tensor helpers ═══════════════════════*/
 
 static const RVCTensor *T(const WuBuRVCModel *m, const char *name) {
     return wubu_rvc_find_tensor(m, name);
@@ -786,7 +792,8 @@ int wubu_flow_reverse(WuBuRVCModel *model,
 int wubu_generator_nsf(WuBuRVCModel *model,
                        const float *z, int n_frames, int inter_channels,
                        const float *nsff0, const float *g,
-                       float *out, int max_samples) {
+                       float *out, int max_samples,
+                       int inject_noise) {
     int nF = n_frames;
     const RVCTensor *conv_pre_w = T(model, "dec.conv_pre.weight");
     const RVCTensor *conv_pre_b = T(model, "dec.conv_pre.bias");
@@ -921,8 +928,15 @@ int wubu_generator_nsf(WuBuRVCModel *model,
             if (fi > 0) phase += rad_acc[fi - 1];     /* add carry from prev frame */
             float s = sinf(2.0f * (float)M_PI * phase) * 0.1f;  /* sine_amp = 0.1 */
             float sv = (nsff0[fi] > 0) ? 1.0f : 0.0f;  /* uv mask */
-            float sw = s * sv;                          /* sine * uv (noise=0) */
-            sine[j] = tanhf(linw * sw + linb);         /* l_linear + tanh */
+            /* Phase 4 improvement: noise injection in NSF sine generation.
+             * PyTorch SineGen injects uniform noise in unvoiced regions:
+             *   noise_amp = (1 - uv) * sine_amp / 3 = (1 - uv) * 0.0333
+             * This adds natural breathiness/silence texture. For parity mode
+             * (randn_scale=0), noise is suppressed. */
+            float noise_amp = inject_noise ? (1.0f - sv) * 0.1f / 3.0f : 0.0f;
+            float noise = noise_amp * wubu_rand_uniform(-1.0f, 1.0f);
+            float sw = s * sv + noise;                     /* sine * uv + noise * (1-uv) */
+            sine[j] = tanhf(linw * sw + linb);             /* l_linear + tanh */
         }
         free(carry); free(rad_acc); free(rad);
     }
@@ -1160,7 +1174,7 @@ int wubu_rvc_synthesize_real(WuBuRVCModel *model,
     }
 
     int n_out = wubu_generator_nsf(model, z, n_frames, inter, nsff0, g,
-                                   out_audio, max_samples);
+                                   out_audio, max_samples, randn_scale > 0.0f);
 
     free(m); free(logs); free(x_mask); free(z_p); free(z);
     return n_out;

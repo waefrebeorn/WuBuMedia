@@ -137,6 +137,7 @@ typedef struct {
     int        n_flow_layers;
     int        n_upsample_layers;
     int        upsample_rates[8];  /* e.g. [10,10,2,2] for 40k, [12,10,2,2] for 48k */
+    int        upsample_kernel_sizes[8];  /* e.g. [16,16,4,4] for 40k */
     int        upsample_rate;      /* product of upsample_rates[] */
     int        n_mrf_stacks;
     int        n_residual_layers;

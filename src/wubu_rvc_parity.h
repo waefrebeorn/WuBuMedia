@@ -141,6 +141,7 @@ struct WuBuRVCModel {
     /* Speaker embedding */
     float speaker_emb[512];
     int   n_speakers;
+    int   has_spk_embed;  /* 1 = multi-speaker model with spk_embed_dim */
 
     /* HuBERT (also serves as ContentVec and WavLM — same architecture) */
     WuBuHuBERT hubert;
@@ -204,6 +205,7 @@ struct WuBuRVCModel {
     int   mel_channels;
     int   upsample_rate;
     int   upsample_rates[8];  /* e.g. [10,10,2,2] for 40k Cartman, [12,10,2,2] for 48k Miku */
+    int   upsample_kernel_sizes[8];  /* e.g. [16,16,4,4] for 40k */
     int   n_upsample_layers;
     float version_f;
 
