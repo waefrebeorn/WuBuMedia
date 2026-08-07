@@ -109,6 +109,24 @@ static void lrelu(float *data, size_t n) {
         data[i] = data[i] > 0 ? data[i] : 0.1f * data[i];
 }
 
+/* ── Snake activation (BigVGAN): f(x) = x + (1/α)sin²(αx) ──
+ * Provides periodic inductive bias for audio signals.
+ * α=1 is the standard BigVGAN choice. */
+static inline float snake(float x, float a) {
+    return x + (1.0f / a) * sinf(a * x) * sinf(a * x);
+}
+
+/* ── Snake + LeakyReLU combined (BigVGAN): f(x) = Snake(x) + LReLU(x) ──
+ * This is the BigVGAN activation that improves audio quality over LReLU alone. */
+static void snake_lrelu(float *data, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        float x = data[i];
+        float s = snake(x, 1.0f);        /* periodic component */
+        float lr = x > 0 ? x : 0.1f * x;  /* leaky ReLU component */
+        data[i] = s + lr;
+    }
+}
+
 /* ── MRF ResBlock pair: convs1 → LeakyReLU → convs2 + residual ──
  * Applio ResBlock.forward:
  *   for conv1, conv2 in zip(convs1, convs2):
@@ -335,14 +353,14 @@ int wubu_kernel_hifigan_exact(const WuBuRVCModel *model,
                         acc += prev[(size_t)c * prev_n + src] * kw[tap];
                 }
             }
-            output[j] = tanf(acc);
+            output[j] = tanhf(acc);
         }
     } else {
         for (int j = 0; j < prev_n; j++) {
             float acc = 0.0f;
             for (int c = 0; c < 32; c++)
                 acc += prev[(size_t)c * prev_n + j];
-            output[j] = tanf(acc / 32.0f);
+            output[j] = tanhf(acc / 32.0f);
         }
     }
 
