@@ -94,7 +94,7 @@ static void conv1d_c(const float *in, int in_ch, int n,
          * tile the SEQUENCE: each thread loads its input tile once and
          * accumulates into ALL output channels. */
         const int TILE = 8192;
-#pragma omp parallel for schedule(static) if(n_out >= TILE)
+#pragma omp parallel for schedule(dynamic, 4) if(n_out >= TILE)
         for (int jb = 0; jb < n_out; jb += TILE) {
             int j_hi = jb + TILE < n_out ? jb + TILE : n_out;
             for (int oc = 0; oc < out_ch; oc++) {
@@ -150,7 +150,7 @@ static void conv1d_c(const float *in, int in_ch, int n,
                 for (int j = 0; j < n_out; j++) orow[j] = bias;
                 continue;
             }
-#pragma omp parallel for schedule(static) if(n_out >= 4096)
+#pragma omp parallel for schedule(dynamic, 64) if(n_out >= 4096)
             for (int j = 0; j < n_out; j++) {
                 float acc = bias;
                 for (int ic = 0; ic < in_ch; ic++) {

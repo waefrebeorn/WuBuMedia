@@ -254,7 +254,7 @@ int main(int argc, char **argv) {
     float rms_mix = 0.25f;    /* --rmsmix F: output follows input volume envelope (RVC default 0.25) */
     int autokey_probe = 0;    /* --autokey N: auto key adaptation (N = probe secs) */
     float chunk_secs = 3.0f;  /* --chunk F: chunked inference (3s default; 0 = whole-track) */
-    int jobs = 2;             /* --jobs N: parallel chunk workers */
+    int jobs = 4;             /* --jobs N: parallel chunk workers (sweet spot measured) */
     int no_chunk = 0;         /* --no-chunk: force the whole-track path (parity) */
     float autokey_shift = 0.0f; /* chosen feed shift (semitones), applied + restored */
     snprintf(model_path, sizeof(model_path), "%s/model.pth", model_dir);
