@@ -192,15 +192,32 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 1
-    out_mp4 = sys.argv[1]
-    wavs = sys.argv[2:]
-    labels = [
-        ("FINAL · RMVPE f0 · LeakyReLU det", "training-time RMVPE f0 in C11 (corr 0.999 vs Python) + nearest content ×2 + f0 1:1"),
-        ("FINAL · RMVPE f0 · LeakyReLU noise", "same + natural NSF noise injection"),
-        ("FINAL · RMVPE f0 · Snake→fallback det", "snake auto-fallback to LeakyReLU (identical output)"),
-        ("FINAL · RMVPE f0 · Snake→fallback noise", "snake auto-fallback — no square wave"),
-        ("GOLD STANDARD · PyTorch Mangio", "reference from the verified PyTorch pipeline (corr 0.9999)"),
-    ]
+    args = sys.argv[1:]
+    out_mp4 = args.pop(0)
+    seg_dur = 3.5
+    labels = []
+    rest = []
+    while args:
+        a = args.pop(0)
+        if a == "--dur":
+            seg_dur = float(args.pop(0))
+        elif a == "--labels":
+            lf = args.pop(0)
+            with open(lf, encoding="utf-8") as f:
+                for line in f:
+                    line = line.rstrip("\n")
+                    if not line.strip():
+                        continue
+                    if "|" in line:
+                        lab, note = line.split("|", 1)
+                        labels.append((lab.strip(), note.strip()))
+                    else:
+                        labels.append((line.strip(), ""))
+        else:
+            rest.append(a)
+    wavs = rest
+    if not labels:
+        labels = [(os.path.basename(w), "") for w in wavs]
     with tempfile.TemporaryDirectory() as td:
         segs = []
         for i, wav in enumerate(wavs):
@@ -216,7 +233,7 @@ def main():
             subprocess.run([
                 "ffmpeg", "-y", "-loop", "1", "-i", png, "-i", wav,
                 "-c:v", "libx264", "-tune", "stillimage", "-preset", "fast",
-                "-t", "3.5", "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
+                "-t", f"{seg_dur}", "-c:a", "aac", "-b:a", "192k", "-pix_fmt", "yuv420p",
                 "-shortest", mp4seg
             ], check=True, capture_output=True)
             segs.append(mp4seg)

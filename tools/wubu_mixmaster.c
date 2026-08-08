@@ -51,6 +51,28 @@ int main(int argc, char **argv) {
         pans[i] = pstr ? (float)atof(pstr + 1) : 0.0f;
         stems[i] = wubu_audio_read_stereo(tmp);
         if (!stems[i]) die("cannot read stem");
+        if (stems[i]->sr != sr) {
+            /* resample interleaved stereo to the bus rate */
+            int n_out = (int)((double)stems[i]->n * sr / stems[i]->sr);
+            if (n_out < 1) n_out = 1;
+            float *tmpbuf = (float *)malloc((size_t)n_out * 2 * sizeof(float));
+            if (!tmpbuf) die("alloc");
+            float *mono_in = (float *)malloc((size_t)stems[i]->n * sizeof(float));
+            if (!mono_in) die("alloc");
+            for (int j = 0; j < stems[i]->n; j++) mono_in[j] = stems[i]->data[j * 2];
+            float *mono_out = (float *)malloc((size_t)n_out * sizeof(float));
+            if (!mono_out) die("alloc");
+            wubu_audio_resample(mono_in, stems[i]->n, stems[i]->sr, sr, mono_out);
+            for (int j = 0; j < n_out; j++) {
+                tmpbuf[j * 2] = mono_out[j];
+                tmpbuf[j * 2 + 1] = mono_out[j];
+            }
+            free(mono_in); free(mono_out);
+            free(stems[i]->data);
+            stems[i]->data = tmpbuf;
+            stems[i]->n = n_out;
+            stems[i]->sr = sr;
+        }
         if (stems[i]->n > max_n) max_n = stems[i]->n;
     }
 
