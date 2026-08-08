@@ -41,14 +41,16 @@ int main(int argc, char **argv) {
     for (int i = 0; i < n_stems; i++) {
         char tmp[1024];
         snprintf(tmp, sizeof(tmp), "%s", argv[i + 3]);
-        char *colon = strchr(tmp, ':');
-        if (!colon) die("stem must be path:gain:pan");
-        *colon = 0;
-        char *gstr = colon + 1;
-        char *pstr = strchr(gstr, ':');
-        if (pstr) *pstr = 0;
-        gains[i] = (float)atof(gstr);
-        pans[i] = pstr ? (float)atof(pstr + 1) : 0.0f;
+        /* parse from the right: pan is the last field, gain before it.
+         * This keeps Windows drive letters ("C:\...") intact in the path. */
+        char *pstr = strrchr(tmp, ':');
+        if (!pstr) die("stem must be path:gain:pan");
+        *pstr = 0;
+        pans[i] = (float)atof(pstr + 1);
+        char *gstr = strrchr(tmp, ':');
+        if (!gstr) die("stem must be path:gain:pan");
+        *gstr = 0;
+        gains[i] = (float)atof(gstr + 1);
         stems[i] = wubu_audio_read_stereo(tmp);
         if (!stems[i]) die("cannot read stem");
         if (stems[i]->sr != sr) {
