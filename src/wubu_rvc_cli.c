@@ -142,6 +142,8 @@ static float *upsample_frames(const float *in, int T, int dim, int *T2_out) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0); /* crash-safe stage logging */
+    setvbuf(stderr, NULL, _IONBF, 0);
     if (argc < 4) {
         fprintf(stderr,
                 "Usage: %s <input.wav> <model_dir> <output.wav> [--model file.pth]\n"
@@ -261,7 +263,8 @@ int main(int argc, char **argv) {
     printf("[1] input: %d samples @%d Hz (%.2f s)\n", n_in, sr_in, (double)n_in / sr_in);
     int n16 = 0;
     float *pcm16 = resample(audio, n_in, sr_in, 16000, &n16);
-    free(audio);
+    /* NOTE: do NOT free(audio) here — the rms_mix stage (post-synth) needs
+     * the original input at its native rate. Freed in the cleanup block. */
     if (!pcm16) die("resample failed");
 
     /* Build config early so we can load the model and determine version */
@@ -519,6 +522,7 @@ int main(int argc, char **argv) {
            (double)n_out / sr_out);
 
     free(pcm16); free(f0_coarse); free(nsff0); free(out_audio); free(cmaj);
+    free(audio);
     wubu_hubert_free(&hb);
     wubu_rvc_destroy(rvc);
     return 0;

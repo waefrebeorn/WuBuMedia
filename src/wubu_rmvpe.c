@@ -135,6 +135,9 @@ static void conv2d(const float *in, int cin, int H, int W,
                    const float *w, const float *b, int cout, int k, int pad,
                    float *out) {
     memset(out, 0, (size_t)cout * H * W * sizeof(float));
+    /* parallel over output channels — the U-Net convs dominate RMVPE time
+     * on long audio (serial = minutes on a 45s vocal) */
+#pragma omp parallel for schedule(static) if(cout >= 4)
     for (int oc = 0; oc < cout; oc++) {
         const float *wrow = w + (size_t)oc * cin * k * k;
         float bias = b ? b[oc] : 0.0f;
@@ -165,10 +168,11 @@ static void convt2d(const float *in, int cin, int H, int W,
                     const float *w, const float *b, int cout, int k, int s, int p, int op,
                     int H2, int W2, float *out) {
     memset(out, 0, (size_t)cout * H2 * W2 * sizeof(float));
-    for (int ic = 0; ic < cin; ic++) {
-        const float *wch = w + (size_t)ic * cout * k * k;
-        for (int oc = 0; oc < cout; oc++) {
-            const float *wrow = wch + (size_t)oc * k * k;
+    /* parallel over output channels; each oc accumulates over all ic */
+#pragma omp parallel for schedule(static) if(cout >= 4)
+    for (int oc = 0; oc < cout; oc++) {
+        for (int ic = 0; ic < cin; ic++) {
+            const float *wrow = w + ((size_t)ic * cout + oc) * k * k;
             for (int h = 0; h < H; h++) {
                 int ho0 = h * s - p;
                 for (int wi = 0; wi < W; wi++) {

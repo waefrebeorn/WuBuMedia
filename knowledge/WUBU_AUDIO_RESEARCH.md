@@ -128,3 +128,57 @@ The off-key/glitch fixes are: (1) f0 median filter (`filter_radius`),
 (2) true-peak limiter at -1 dBFS ceiling, (3) rms_mix_rate envelope match,
 (4) protect voiceless consonants, (5) sinc resampler, (6) optional index
 retrieval, (7) LUFS metering. All are C11-doable and belong in the engine.
+
+## WordVoice TTS integration (2026-08-08)
+
+- **WordVoice-base-0.5B (XXH333) = the TTS backbone** (Apache-2.0, paper
+  arXiv:2607.06461, built on Fun-CosyVoice3-0.5B-2512). Word-level control
+  of 5 acoustic dims: duration, boundary (b0-b4), energy, pitch (-1..1),
+  tone (flat/rise/rrise/fall/ffall/peak/valley) via "acoustic thinking"
+  bound-token. Zero-shot voice cloning from a ~10s prompt.
+- **Models** (in `out/WordVoice/checkpoints/`, 15.4 GB total):
+  Fun-CosyVoice3-0.5B (9.1G), mms_fa aligner (1.2G), WordVoice-base-0.5B
+  (5.1G: wordvoice_llm_en.pt, wordvoice_fm.pt).
+- **Windows deps** (installed into .venv_win on top of torch 2.6+cu124):
+  einops, conformer, diffusers, inflect, num2words, x_transformers,
+  hyperpyyaml, cn2an, torchaudio 2.6.0+cu124 (--no-deps), modelscope,
+  openai-whisper, pypinyin, matplotlib, torchcrepe, scipy, onnxruntime,
+  lightning==2.2.4 (flow_matching), pyworld, onnx, gdown, wget,
+  hydra-core==1.3.2 + omegaconf==2.3.0 (CRITICAL: newer hydra breaks
+  CosyVoice's yaml load), python-dateutil (force-reinstall).
+- **Repo fixes applied** (reference bugs — we fix and keep parity):
+  - `cosyvoice/llm/wordvoice_llm.py`: all `logits[...] = negative_inf`
+    must be `negative_inf.to(logits.dtype)` (fp16 inference, 6 sites).
+  - `eval()` needs module globals `Aligner_Model` + `wordvoice` set before
+    calling (they're only defined under `__main__` in wordvoice_infer.py) —
+    driver sets them via `wvi.Aligner_Model = ...`.
+  - Init `WordVoice(..., fp16=True)` for GPU (bf16 checkpoint vs fp32
+    inputs mismatch otherwise).
+- **Driver**: `tools/wubu_wordvoice_jokes.py` — scripted knock-knocks with
+  inline `[dur:ms] [eng:x] [pit:x] [bnd:bN] [ton:...]` tags per word →
+  WordVoice TTS (reference prompt `demo/prompt_speech_en.mp3` +
+  "The team that change what they're doing...") → soundfile PCM16 →
+  our C11 RVC character voice. The LLM's default pacing is ~40ms/word —
+  explicit [dur:200-240] tags are required for natural speech.
+- WordVoice writes float32 wav (format 3) — Python `wave` can't read it;
+  use soundfile or our C11 audioio.
+
+## CRASH FIX: rms_mix use-after-free (2026-08-08)
+
+- Symptom: 45s conversions + short TTS inputs crashed (rc=139) right after
+  synth, inside the rms_mix resample. Root cause: the CLI freed the input
+  `audio` buffer after the 16k resample, then the rms_mix stage read the
+  dangling pointer. Deterministic at -O2/-O3, worked at -O0, intermittent
+  under gdb — classic freed-heap reuse.
+- Fix: `free(audio)` moved to the cleanup block; rms_mix keeps the
+  original-rate input. Lesson: when adding a stage that reads the input
+  AFTER a free, verify buffer lifetimes (angel coder = no UAF).
+
+## Performance (2026-08-08)
+
+- RMVPE conv2d/convt2d + GRU gate loops now OpenMP-parallelized over
+  output channels (was 100% serial). Parity unchanged (0.9999).
+- CLI built -O3. 45s conversion ~8-9 min single-threaded-conversion;
+  two concurrent conversions contend (avoid running 2 at once).
+- HuBERT ~0.7x realtime; synth ~11x realtime (flow+generator, OpenMP'd).
+  Next big win: batch GRU over frames (RMVPE) + conv1d tiling.

@@ -84,7 +84,8 @@ static void gru_dir_run(const GruDir *d, const float *x, int T, float *hseq) {
 
     for (int t = 0; t < T; t++) {
         const float *xt = x + (size_t)t * in;
-        /* g = W_ih x_t + b_ih + W_hh h_prev + b_hh */
+        /* g = W_ih x_t + b_ih + W_hh h_prev + b_hh — rows are independent */
+#pragma omp parallel for schedule(static) if(h >= 64)
         for (int row = 0; row < 3 * h; row++) {
             float acc = d->b_ih[row] + d->b_hh[row];
             const float *wi = d->w_ih + (size_t)row * in;
