@@ -45,12 +45,19 @@ Result on vocal sections: **-19.0 dBFS vs his -18.3 dBFS** (0.7 dB) — matched.
 | 1 | G.O.L.D. | cleveGOLDhope | 241.0 s |
 | 2 | Freestyle Driving Lesson | clevespooner | 206.6 s |
 | 3 | Cleveland Sings Golden | clevegoldenkpop | 112.8 s |
-| 4 | Seth's Lament | (no project) | 251.4 s (his master as-is) |
+| 4 | Seth's Lament | **sethslament** (route "seth" = the take) | 251.4 s |
 | 5 | Slumbers in Gold | cleveslumbergold | 131.8 s |
-| 6 | Bring My Cleveland Back | kissrose4track= | 311.2 s |
+| 6 | Bring My Cleveland Back | **bringclevelandback** (route "peter" = the take; Yi Jian Mei backing) | 311.2 s |
 | 7 | Cleveland Is Golden | clevelandisgolden | 209.2 s |
 | 8 | 24K Cleveland | 20kcleeveland | 199.6 s |
 | 9 | Cleveland's Quahog Hour | clevelandquohoghour | 219.3 s |
+
+NOTE: `kissrose4track=` is an OLD project (Seal's "Kiss From A Rose" cover with
+old Cleveland vocals) — NOT the album. The real Track 6 project is
+`bringclevelandback` (the boss's "Asian song" = Yi Jian Mei backing, route
+"peter" holds the take). Voice models: Track 4 = Seth Macfarlane (Singing,
+48k, HF JGMYT/Seth_Macfarlane); Track 6 = Peter Griffin (Deepfake Peter 220e,
+HF Coolwowsocoolwow/Fake_Peter).
 
 ## Tools
 
