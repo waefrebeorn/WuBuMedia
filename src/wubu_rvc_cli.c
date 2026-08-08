@@ -16,8 +16,8 @@
  *   1. load wav -> resample to 16k
  *   2. load model (.pth) -> determine version (v1/v2), sample rate, upsample
  *   3. HuBERT content (v2: layer 12 768-dim, v1: layer 9 + final_proj 256-dim)
- *   4. linear ×2 upsampling of content to 200 fps
- *   5. YIN f0 at 100 fps -> coarse + nsff0, then ×2 nearest to 200 fps
+ *   4. nearest ×2 upsampling of content (matches F.interpolate scale=2)
+ *   5. YIN f0 at 100 fps -> coarse + nsff0 (1:1 with ×2 content, NO ×2 on f0)
  *   6. wubu_rvc_synthesize_real -> audio at model sample rate
  *   7. write PCM_16 wav
  *
@@ -125,22 +125,21 @@ static float *resample(const float *in, int n_in, int sr_in, int sr_out, int *n_
     return out;
 }
 
-/* linear ×2 upsample along frames: [T, dim] -> [2T, dim] frame-major.
- * Matches the RVC pipeline's content interpolation (scale_factor=2). */
+/* nearest ×2 upsample along frames: [T, dim] -> [2T, dim] frame-major.
+ * Matches the RVC pipeline's content interpolation EXACTLY:
+ *   F.interpolate(feats, scale_factor=2)  (3D input → default mode='nearest')
+ * Verified vs reference content_up.npy: max diff 0.0 (2026-08-07).
+ * The old linear align_corners=True version produced different content →
+ * different flow output → robotic/wrong voice. */
 static float *upsample_frames(const float *in, int T, int dim, int *T2_out) {
     int T2 = T * 2;
     float *out = (float *)calloc((size_t)T2 * dim, sizeof(float));
     if (!out) return NULL;
     for (int j = 0; j < T2; j++) {
-        double pos = j * (T - 1) / (double)(T2 - 1); /* align_corners */
-        int i0 = (int)pos;
-        int i1 = i0 + 1 < T ? i0 + 1 : i0;
-        double frac = pos - i0;
-        for (int d = 0; d < dim; d++) {
-            double a = in[(size_t)i0 * dim + d];
-            double b = in[(size_t)i1 * dim + d];
-            out[(size_t)j * dim + d] = (float)(a + (b - a) * frac);
-        }
+        int i0 = j / 2;              /* nearest: repeat each frame twice */
+        if (i0 >= T) i0 = T - 1;
+        memcpy(out + (size_t)j * dim, in + (size_t)i0 * dim,
+               (size_t)dim * sizeof(float));
     }
     *T2_out = T2;
     return out;
@@ -158,7 +157,8 @@ int main(int argc, char **argv) {
                 "         --preset N    : character preset (1=warm, 2=bright, 3=smooth, 4=breaty)\n"
                 "         --snake       : use Snake activation (BigVGAN: x + (1/a)sin^2(a*x))\n"
                 "         --formant R   : formant shift ratio (1.0=none, <1=male, >1=female)\n"
-                "         --f0smooth S  : F0 contour smoothing strength (0.0-1.0)\n",
+                "         --f0smooth S  : F0 contour smoothing strength (0.0-1.0)\n"
+                "         --f0ref DIR   : use reference f0 (nsff0_raw.bin + f0_coarse.bin)\n",
                 argv[0]);
         return 1;
     }
@@ -175,6 +175,7 @@ int main(int argc, char **argv) {
     int use_snake = 0;        /* 0 = LeakyReLU (original), 1 = Snake (BigVGAN) */
     float formant_shift = 1.0f; /* 1.0 = no shift */
     float f0_smooth = 0.0f;   /* 0.0 = no smoothing */
+    char f0ref_dir[1024] = {0}; /* reference f0 dir (nsff0_raw.bin + f0_coarse.bin) */
     snprintf(model_path, sizeof(model_path), "%s/model.pth", model_dir);
     for (int a = 4; a < argc - 1; a++) {
         if (strcmp(argv[a], "--model") == 0) {
@@ -199,6 +200,9 @@ int main(int argc, char **argv) {
             a++;
         } else if (strcmp(argv[a], "--f0smooth") == 0) {
             f0_smooth = (float)atof(argv[a + 1]);
+            a++;
+        } else if (strcmp(argv[a], "--f0ref") == 0) {
+            snprintf(f0ref_dir, sizeof(f0ref_dir), "%s", argv[a + 1]);
             a++;
         }
     }
@@ -302,23 +306,51 @@ int main(int argc, char **argv) {
     free(content);
     printf("[4] content_up frames: %d\n", T2);
 
-    /* 5. f0 (YIN at 16k, 100 fps) + coarse, then ×2 nearest to 200 fps */
+    /* 5. f0 (YIN at 16k, 100 fps) + coarse. RVC consumes f0 at the SAME
+     * frame rate as the ×2 content (100 fps: 278 frames for 2.78 s) — NO ×2
+     * on f0. The old ×2-nearest-then-truncate compressed the pitch contour
+     * 2× against content → robotic/wrong voice. test_rvc_real passes f0 1:1
+     * with content_up (verified corr 0.9999 vs PyTorch, SNR 29.7 dB).
+     *    --f0ref DIR: load reference nsff0_raw.bin (float32 100fps) +
+     *    f0_coarse.bin (int32 100fps) instead of YIN. */
     int n_f0 = 0;
     float *f0 = (float *)malloc((size_t)(n16 / 160 + 2) * sizeof(float));
-    n_f0 = wubu_f0_yin(pcm16, n16, 16000, 1024, 160, 50.0f, 1100.0f, f0, n16 / 160 + 2);
-    printf("[5] yin f0 frames: %d\n", n_f0);
-    int *coarse100 = (int *)malloc((size_t)n_f0 * sizeof(int));
-    float *nsff0_100 = (float *)malloc((size_t)n_f0 * sizeof(float));
-    wubu_f0_to_coarse(f0, n_f0, 50.0f, 1100.0f, coarse100, nsff0_100);
-    int n_f0_2 = n_f0 * 2;
-    int *f0_coarse = (int *)malloc((size_t)n_f0_2 * sizeof(int));
-    float *nsff0 = (float *)malloc((size_t)n_f0_2 * sizeof(float));
-    for (int j = 0; j < n_f0_2; j++) {
-        int i = j / 2; if (i >= n_f0) i = n_f0 - 1;
-        f0_coarse[j] = coarse100[i];
-        nsff0[j] = nsff0_100[i];
+    int *f0_coarse = NULL;
+    float *nsff0 = NULL;
+    int n_f0_2 = 0;
+    if (f0ref_dir[0]) {
+        char fp[1024], cp[1024];
+        snprintf(fp, sizeof(fp), "%s/nsff0_raw.bin", f0ref_dir);
+        snprintf(cp, sizeof(cp), "%s/f0_coarse.bin", f0ref_dir);
+        FILE *ff = fopen(fp, "rb");
+        FILE *cf = fopen(cp, "rb");
+        if (!ff || !cf) die("--f0ref needs nsff0_raw.bin + f0_coarse.bin");
+        fseek(ff, 0, SEEK_END); long fsz = ftell(ff); fseek(ff, 0, SEEK_SET);
+        fseek(cf, 0, SEEK_END); long csz = ftell(cf); fseek(cf, 0, SEEK_SET);
+        n_f0 = (int)(fsz / 4);
+        f0 = (float *)realloc(f0, (size_t)(n_f0 + 2) * sizeof(float));
+        if (fread(f0, 4, (size_t)n_f0, ff) != (size_t)n_f0) die("f0ref read fail");
+        fclose(ff);
+        f0_coarse = (int *)malloc((size_t)(n_f0 + 2) * sizeof(int));
+        nsff0 = (float *)malloc((size_t)(n_f0 + 2) * sizeof(float));
+        if (csz == (long)n_f0 * 4) {
+            if (fread(f0_coarse, 4, (size_t)n_f0, cf) != (size_t)n_f0) die("coarse read fail");
+            for (int j = 0; j < n_f0; j++) nsff0[j] = f0[j];
+        } else {
+            fclose(cf);
+            wubu_f0_to_coarse(f0, n_f0, 50.0f, 1100.0f, f0_coarse, nsff0);
+        }
+        n_f0_2 = n_f0;
+        printf("[5] f0 from reference (%d frames @100fps)\n", n_f0);
+    } else {
+        n_f0 = wubu_f0_yin(pcm16, n16, 16000, 1024, 160, 50.0f, 1100.0f, f0, n16 / 160 + 2);
+        printf("[5] yin f0 frames: %d\n", n_f0);
+        f0_coarse = (int *)malloc((size_t)(n_f0 + 2) * sizeof(int));
+        nsff0 = (float *)malloc((size_t)(n_f0 + 2) * sizeof(float));
+        wubu_f0_to_coarse(f0, n_f0, 50.0f, 1100.0f, f0_coarse, nsff0);
+        n_f0_2 = n_f0;
     }
-    free(f0); free(coarse100); free(nsff0_100);
+    free(f0);
 
     /* 6. real synth */
     printf("[6] synth...\n");
@@ -326,6 +358,18 @@ int main(int argc, char **argv) {
     int max_audio = n_frames * ups_total;
     float *out_audio = (float *)malloc((size_t)max_audio * sizeof(float));
     if (!out_audio) die("alloc");
+
+    if (getenv("WUBU_RVC_DUMP")) {
+        /* debug: dump the exact synth inputs for parity comparison */
+        FILE *df = fopen("outputs/rvc_ref/cli_content_up.bin", "wb");
+        if (df) { fwrite(content_up, sizeof(float), (size_t)T2 * content_dim, df); fclose(df); }
+        df = fopen("outputs/rvc_ref/cli_nsff0.bin", "wb");
+        if (df) { fwrite(nsff0, sizeof(float), (size_t)n_f0_2, df); fclose(df); }
+        df = fopen("outputs/rvc_ref/cli_coarse.bin", "wb");
+        if (df) { fwrite(f0_coarse, sizeof(int), (size_t)n_f0_2, df); fclose(df); }
+        fprintf(stderr, "[dump] cli_content_up (%d x %d), cli_nsff0 (%d), cli_coarse (%d)\n",
+                T2, content_dim, n_f0_2, n_f0_2);
+    }
 
     /* transpose content_up [T2, dim] frame-major -> [dim, T2] col-major */
     float *cmaj = (float *)malloc((size_t)content_dim * n_frames * sizeof(float));
