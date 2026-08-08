@@ -1078,6 +1078,12 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                                ups_out[L], ups_k[L], ups_rate[L], ups_pad[L], stage[L]);
         }
 
+        if (L == 0 && getenv("WUBU_DUMP_CPU")) {
+            fprintf(stderr, "CPUUP0");
+            for (int q = 0; q < 8; q++) fprintf(stderr, " %.3f", stage[0][q]);
+            fprintf(stderr, "\n");
+        }
+
         /* x = x + noise_convs[L](har_source): Conv1d(1 -> ups_out, k=2*stride, s=stride, p=stride/2) */
         {
             int stride = 1;
@@ -1108,6 +1114,12 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                     free(nc_out);
                 }
             }
+        }
+
+        if (L == 0 && getenv("WUBU_DUMP_CPU")) {
+            fprintf(stderr, "CPUN0B");
+            for (int q = 0; q < 8; q++) fprintf(stderr, " %.3f", stage[0][q]);
+            fprintf(stderr, "\n");
         }
 
         /* MRF: avg over n_mrf_stacks resblock stacks (kernel sizes + dilations
@@ -1174,6 +1186,11 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                         free(tmp);
                     }
                     for (int i = 0; i < ch * next_n; i++) acc_s[i] += rb_in[i];
+                    if (L == 0 && s == 0 && getenv("WUBU_DUMP_CPU")) {
+                        fprintf(stderr, "CPUACCB");
+                        for (int q = 0; q < 8; q++) fprintf(stderr, " %.3f", acc_s[q]);
+                        fprintf(stderr, "\n");
+                    }
                     free(rb_in); free(rb_out);
                 }
                 for (int i = 0; i < ch * next_n; i++) {
@@ -1181,6 +1198,11 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                     for (int st = 0; st < n_stacks; st++)
                         s += acc[(size_t)st * ch * next_n + i];
                     stage[L][i] = s / (float)n_stacks;
+                }
+                if (L == 0 && getenv("WUBU_DUMP_CPU")) {
+                    fprintf(stderr, "CPUM0B");
+                    for (int q = 0; q < 8; q++) fprintf(stderr, " %.3f", stage[0][q]);
+                    fprintf(stderr, "\n");
                 }
                 free(acc);
             }
@@ -1343,6 +1365,67 @@ int wubu_rvc_synthesize_real(WuBuRVCModel *model,
     int n_out = wubu_generator_nsf(model, z, n_frames, inter, nsff0, g,
                                    out_audio, max_samples, randn_scale > 0.0f, use_snake);
 
+    free(m); free(logs); free(x_mask); free(z_p); free(z);
+    return n_out;
+}
+
+/* Same flow as synthesize_real but the generator runs on the GPU
+ * (wubu_generator_nsf_cuda in wubu_rvc_cuda.cu — exact same math). */
+int wubu_rvc_synthesize_real_cuda(WuBuRVCModel *model,
+                                  const float *content, int n_frames, int content_dim,
+                                  const int *f0_coarse, const float *nsff0,
+                                  int sid, float randn_scale,
+                                  float *out_audio, int max_samples,
+                                  int use_snake) {
+    if (!model || !content || !out_audio || n_frames < 1) return -1;
+    const RVCTensor *emb_g = T(model, "emb_g.weight");
+    if (!emb_g) return -1;
+    int gin = emb_g->dims[1];
+    if (sid < 0) sid = 0;
+    if (sid >= emb_g->dims[0]) sid = 0;
+    float g[256];
+    for (int i = 0; i < gin && i < 256; i++) g[i] = emb_g->data[(size_t)sid * gin + i];
+    int inter = 192;
+    {
+        const RVCTensor *pw = T(model, "enc_p.proj.weight");
+        if (pw) inter = pw->dims[0] / 2;
+    }
+    float *m = (float *)malloc((size_t)inter * n_frames * sizeof(float));
+    float *logs = (float *)malloc((size_t)inter * n_frames * sizeof(float));
+    float *x_mask = (float *)malloc((size_t)n_frames * sizeof(float));
+    float *z_p = (float *)malloc((size_t)inter * n_frames * sizeof(float));
+    float *z = (float *)malloc((size_t)inter * n_frames * sizeof(float));
+    if (!m || !logs || !x_mask || !z_p || !z) {
+        free(m); free(logs); free(x_mask); free(z_p); free(z); return -1;
+    }
+    if (wubu_enc_p_forward(model, content, n_frames, content_dim,
+                           f0_coarse, m, logs, x_mask) != 0) {
+        free(m); free(logs); free(x_mask); free(z_p); free(z); return -1;
+    }
+    for (int c = 0; c < inter; c++) {
+        for (int j = 0; j < n_frames; j++) {
+            float r = 0.0f;
+            if (randn_scale > 0.0f) {
+                r = wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f);
+                r *= randn_scale;
+            }
+            z_p[(size_t)c * n_frames + j] =
+                (m[(size_t)c * n_frames + j] + expf(logs[(size_t)c * n_frames + j]) * r) * x_mask[j];
+            if (z_p[(size_t)c * n_frames + j] > 3.0f) z_p[(size_t)c * n_frames + j] = 3.0f;
+            if (z_p[(size_t)c * n_frames + j] < -3.0f) z_p[(size_t)c * n_frames + j] = -3.0f;
+        }
+    }
+    if (wubu_flow_reverse(model, z_p, n_frames, inter, g, x_mask, z) != 0) {
+        free(m); free(logs); free(x_mask); free(z_p); free(z); return -1;
+    }
+    int n_out = wubu_generator_nsf_cuda(model, z, n_frames, inter, nsff0, g,
+                                        out_audio, max_samples,
+                                        randn_scale > 0.0f, use_snake);
     free(m); free(logs); free(x_mask); free(z_p); free(z);
     return n_out;
 }
