@@ -1019,12 +1019,15 @@ int wubu_generator_nsf(WuBuRVCModel *model,
         {
             int stride = 1;
             for (int j = L + 1; j < n_ups; j++) stride *= ups_rate[j];
-            int kk = (L == n_ups - 1) ? 1 : stride * 2;
-            int pad = (L == n_ups - 1) ? 0 : stride / 2;
             snprintf(key, sizeof(key), "dec.noise_convs.%d.weight", L);
             const RVCTensor *ncw = T(model, key);
             snprintf(key, sizeof(key), "dec.noise_convs.%d.bias", L);
             const RVCTensor *ncb = T(model, key);
+            /* kernel/pad from the noise-conv weight itself (agnostic);
+             * fallback heuristic only for missing weights. */
+            int kk = ncw && ncw->n_dims >= 3 ? ncw->dims[2] : ((L == n_ups - 1) ? 1 : stride * 2);
+            int pad = (kk - stride) / 2;
+            if (pad < 0) pad = 0;
             if (ncw) {
                 int s_in = n_sine;
                 /* conv1d over 1-channel sine */
@@ -1044,27 +1047,35 @@ int wubu_generator_nsf(WuBuRVCModel *model,
             }
         }
 
-        /* MRF: avg over 3 resblock stacks (k=[3,7,11], dilations [1,3,5]).
-         * The stacks run sequentially here — conv1d_c inside already
-         * parallelizes over its output channels with all threads, which
-         * beats nesting a 3-iteration parallel region inside (nested OMP
-         * is disabled by default and would serialize the inner convs). */
+        /* MRF: avg over n_mrf_stacks resblock stacks (kernel sizes + dilations
+         * come from the model config — NOT hardcoded [3,7,11]). Fallbacks only
+         * if a model ships without config. The stacks run sequentially here —
+         * conv1d_c inside already parallelizes over its output channels with
+         * all threads, which beats nesting a 3-iteration parallel region
+         * inside (nested OMP is disabled by default and would serialize the
+         * inner convs). */
         {
             int ch = ups_out[L];
-            /* per-stack accumulators (3 slices) — no shared writes. */
-            float *acc = (float *)calloc((size_t)3 * ch * next_n, sizeof(float));
+            int n_stacks = model->n_mrf_stacks;
+            if (n_stacks < 1) n_stacks = 3; /* legacy no-config fallback */
+            if (n_stacks > 8) n_stacks = 8;
+            int n_pairs = model->n_resblock_pairs;
+            if (n_pairs < 1) n_pairs = 3;
+            if (n_pairs > 8) n_pairs = 8;
+            /* per-stack accumulators — no shared writes. */
+            float *acc = (float *)calloc((size_t)n_stacks * ch * next_n, sizeof(float));
             if (acc) {
-                int klist[3] = {3, 7, 11};
-                int dlist[3] = {1, 3, 5};
-                for (int s = 0; s < 3; s++) {
+                for (int s = 0; s < n_stacks; s++) {
                     char key[256];
                     float *acc_s = acc + (size_t)s * ch * next_n;
-                    int rb = L * 3 + s;
+                    int rb = L * n_stacks + s;
+                    int k = model->resblock_k[s];
+                    if (k <= 0) k = (s == 0) ? 3 : (s == 1 ? 7 : 11); /* legacy */
                     float *rb_in = (float *)malloc((size_t)ch * next_n * sizeof(float));
                     float *rb_out = (float *)malloc((size_t)ch * next_n * sizeof(float));
                     if (!rb_in || !rb_out) { free(rb_in); free(rb_out); continue; }
                     memcpy(rb_in, stage[L], (size_t)ch * next_n * sizeof(float));
-                    for (int cp = 0; cp < 3; cp++) {
+                    for (int cp = 0; cp < n_pairs; cp++) {
                         snprintf(key, sizeof(key), "dec.resblocks.%d.convs1.%d.weight_v", rb, cp);
                         const RVCTensor *r1v = T(model, key);
                         snprintf(key, sizeof(key), "dec.resblocks.%d.convs1.%d.bias", rb, cp);
@@ -1074,8 +1085,8 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                         snprintf(key, sizeof(key), "dec.resblocks.%d.convs2.%d.bias", rb, cp);
                         const RVCTensor *r2b = T(model, key);
                         if (!r1v || !r2v || !r1v->data || !r2v->data) continue;
-                        int k = klist[s];     /* kernel per stack (3,7,11) */
-                        int dil = dlist[cp];  /* dilation per pair (1,3,5) */
+                        int dil = model->resblock_dil[s][cp];
+                        if (dil <= 0) dil = 1 + 2 * cp; /* legacy 1,3,5 */
                         int pad1 = dil * (k - 1) / 2;
                         int pad2 = k / 2;
                         /* NOTE: wubu_rvc_weights.c ALREADY de-normalized
@@ -1102,9 +1113,12 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                     for (int i = 0; i < ch * next_n; i++) acc_s[i] += rb_in[i];
                     free(rb_in); free(rb_out);
                 }
-                for (int i = 0; i < ch * next_n; i++)
-                    stage[L][i] = (acc[i] + acc[(size_t)ch * next_n + i]
-                                   + acc[2 * (size_t)ch * next_n + i]) / 3.0f;
+                for (int i = 0; i < ch * next_n; i++) {
+                    float s = 0.0f;
+                    for (int st = 0; st < n_stacks; st++)
+                        s += acc[(size_t)st * ch * next_n + i];
+                    stage[L][i] = s / (float)n_stacks;
+                }
                 free(acc);
             }
         }
@@ -1115,18 +1129,24 @@ int wubu_generator_nsf(WuBuRVCModel *model,
         cur_n = next_n;
     }
 
-    /* final: activation, conv_post(32->1, k7, p3, no bias), tanh */
-    if (use_snake) snake_lrelu_c(cur, (size_t)32 * cur_n, 0.1f);
-    else lrelu_c(cur, (size_t)32 * cur_n, 0.1f);
+    /* final: activation, conv_post(1 -> post_in, k=post_k, pad=post_k/2, no
+     * bias), tanh — channels/kernel read from the weight tensor (agnostic).
+     * conv_post.weight is (out_ch=1, in_ch, k), so in_ch = dims[1]. */
+    int post_in = post_w->n_dims >= 2 ? post_w->dims[1] : 32;
+    if (post_in < 1) post_in = 32; /* legacy */
+    int post_k = post_w->n_dims >= 3 ? post_w->dims[2] : 7;
+    int post_pad = post_k / 2;
+    if (use_snake) snake_lrelu_c(cur, (size_t)post_in * cur_n, 0.1f);
+    else lrelu_c(cur, (size_t)post_in * cur_n, 0.1f);
     int out_n = cur_n;
     if (out_n > max_samples) out_n = max_samples;
     {
         for (int j = 0; j < out_n; j++) {
             float acc = 0.0f;
-            for (int c = 0; c < 32; c++) {
-                const float *kw = post_w->data + (size_t)c * 7;
-                for (int tap = 0; tap < 7; tap++) {
-                    int src = j - 3 + tap;
+            for (int c = 0; c < post_in; c++) {
+                const float *kw = post_w->data + (size_t)c * post_k;
+                for (int tap = 0; tap < post_k; tap++) {
+                    int src = j - post_pad + tap;
                     if (src >= 0 && src < cur_n)
                         acc += cur[(size_t)c * cur_n + src] * kw[tap];
                 }

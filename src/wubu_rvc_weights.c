@@ -266,6 +266,32 @@ int wubu_rvc_load_weights(WuBuRVCModel *model, const char *bin_path) {
                             consumed = 6;
                         }
                     }
+                    if (field_id == 6 && n_vals > 0 && n_vals <= 8) {
+                        /* resblock kernel sizes per stack */
+                        for (uint32_t v = 0; v < n_vals && v < 8; v++) {
+                            if (coff + 5 + v * 5 >= config_len) break;
+                            model->resblock_k[v] = (int32_t)read_u32(cfg_buf + coff + 5 + v * 5 + 1);
+                        }
+                        if (n_vals > model->n_mrf_stacks) model->n_mrf_stacks = (int)n_vals;
+                        consumed = 5 + n_vals * 5;
+                    }
+                    if (field_id == 7 && n_vals > 0 && n_vals <= 64) {
+                        /* flat resblock dilations: stack-major [s0p0,s0p1,...,s1p0,...] */
+                        int total = (int)n_vals;
+                        int n_stacks = model->n_mrf_stacks > 0 ? model->n_mrf_stacks : 1;
+                        int pairs = total / n_stacks;
+                        if (pairs < 1) pairs = 1;
+                        if (pairs > 8) pairs = 8;
+                        model->n_resblock_pairs = pairs;
+                        for (int v = 0; v < total && v < 64; v++) {
+                            int st = v / pairs;
+                            int pk = v % pairs;
+                            if (st < 8 && pk < 8)
+                                model->resblock_dil[st][pk] =
+                                    (int32_t)read_u32(cfg_buf + coff + 5 + v * 5 + 1);
+                        }
+                        consumed = 5 + total * 5;
+                    }
                     coff += consumed;
                 }
             }

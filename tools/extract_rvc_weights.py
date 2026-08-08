@@ -112,6 +112,23 @@ def extract(src_pth, dst_bin):
         config_data += struct.pack('<I', 1)
         config_data += struct.pack('B', 0)
         config_data += struct.pack('<i', int(config[5]))
+    # resblock kernel sizes (config[10], e.g. [3,7,11])
+    if len(config) >= 11 and isinstance(config[10], (list, tuple)):
+        ks = [int(x) for x in config[10]]
+        config_data += struct.pack('B', 6)
+        config_data += struct.pack('<I', len(ks))
+        for x in ks:
+            config_data += struct.pack('B', 0)
+            config_data += struct.pack('<i', x)
+    # resblock dilation sizes (config[11], e.g. [[1,3,5],[1,3,5],[1,3,5]])
+    if len(config) >= 12 and isinstance(config[11], (list, tuple)):
+        dl = config[11]
+        flat = [int(x) for row in dl for x in row] if all(isinstance(r, (list, tuple)) for r in dl) else [int(x) for x in dl]
+        config_data += struct.pack('B', 7)
+        config_data += struct.pack('<I', len(flat))
+        for x in flat:
+            config_data += struct.pack('B', 0)
+            config_data += struct.pack('<i', x)
     # version
     version_str = ckpt.get('version', 'v2') if isinstance(ckpt, dict) else 'v2'
     if isinstance(ckpt, dict) and 'model' not in ckpt:
@@ -123,8 +140,8 @@ def extract(src_pth, dst_bin):
     config_data += struct.pack('<i', v)
 
     with open(dst_bin, 'ab') as f:
-        f.write(struct.pack('<I', len(config_data)))
         f.write(config_data)
+        f.write(struct.pack('<I', len(config_data)))
 
     print(f"Extracted {len(tensors)} tensors → {dst_bin} ({os.path.getsize(dst_bin)} bytes)")
     # Print a summary

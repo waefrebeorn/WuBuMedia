@@ -141,6 +141,10 @@ typedef struct {
     int        upsample_rate;      /* product of upsample_rates[] */
     int        n_mrf_stacks;
     int        n_residual_layers;
+    /* MRF resblock topology (from model config, fields 6/7) */
+    int        resblock_k[8];       /* kernel size per stack, e.g. [3,7,11] */
+    int        resblock_dil[8][8];  /* dilations per stack per conv pair */
+    int        n_resblock_pairs;    /* conv pairs per stack (e.g. 3) */
 } RVCGraph;
 
 /* ---- Main RVC engine ---- */

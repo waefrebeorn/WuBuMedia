@@ -207,6 +207,11 @@ struct WuBuRVCModel {
     int   upsample_rates[8];  /* e.g. [10,10,2,2] for 40k Cartman, [12,10,2,2] for 48k Miku */
     int   upsample_kernel_sizes[8];  /* e.g. [16,16,4,4] for 40k */
     int   n_upsample_layers;
+    /* MRF resblock topology (model config, agnostic — no hardcoded [3,7,11]) */
+    int   resblock_k[8];       /* kernel size per stack */
+    int   resblock_dil[8][8];  /* dilations per stack per conv pair */
+    int   n_resblock_pairs;    /* conv pairs per stack */
+    int   n_mrf_stacks;        /* resblock stack count */
     float version_f;
 
     /* Training provenance (from .wubu meta or inferred from .pth) */
