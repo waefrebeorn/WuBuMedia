@@ -479,6 +479,7 @@ WuBuRVC *wubu_rvc_load(const RVCConfig *cfg) {
                 rvc->graph.n_flow_layers = rvc->model->n_flow_layers;
                 rvc->graph.n_residual_layers = rvc->model->n_residual_layers;
                 rvc->graph.sample_rate = rvc->model->sample_rate;
+                rvc->sample_rate = rvc->model->sample_rate;
                 rvc->graph.mel_channels = rvc->model->mel_channels;
                 rvc->graph.n_upsample_layers = rvc->model->n_upsample_layers;
                 rvc->graph.upsample_rate = rvc->model->upsample_rate;

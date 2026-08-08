@@ -244,26 +244,26 @@ int wubu_rvc_load_weights(WuBuRVCModel *model, const char *bin_path) {
                         if (coff + 6 <= config_len) {
                             int32_t sr_val = (int32_t)read_u32(cfg_buf + coff + 6);
                             model->sample_rate = sr_val;
-                            consumed = 6;
+                            consumed = 5 + n_vals * 5;
                         }
                     }
                     if (field_id == 3 && n_vals >= 1) {
                         if (coff + 6 <= config_len) {
                             model->hidden_channels = (int32_t)read_u32(cfg_buf + coff + 6);
-                            consumed = 6;
+                            consumed = 5 + n_vals * 5;
                         }
                     }
                     if (field_id == 4 && n_vals >= 1) {
                         if (coff + 6 <= config_len) {
                             model->mel_channels = (int32_t)read_u32(cfg_buf + coff + 6);
-                            consumed = 6;
+                            consumed = 5 + n_vals * 5;
                         }
                     }
                     if (field_id == 5 && n_vals >= 1) {
                         if (coff + 6 <= config_len) {
                             model->version = (int32_t)read_u32(cfg_buf + coff + 6);
                             model->version_f = (float)model->version;
-                            consumed = 6;
+                            consumed = 5 + n_vals * 5;
                         }
                     }
                     if (field_id == 6 && n_vals > 0 && n_vals <= 8) {
