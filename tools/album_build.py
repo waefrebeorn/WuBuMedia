@@ -83,16 +83,12 @@ def build(proj_dir, lead_pat, out_name, voice=VOICE):
         cmd.append(f"{s}:1.0:{pan}")
     if not run(cmd):
         return 1
-    print(f"[3] mixed (vocal +{20 * np_log10(VOCAL_GAIN):.1f} dB): {out_name}_mix.wav")
+    print(f"[3] mixed (vocal +{20 * math.log10(VOCAL_GAIN):.1f} dB): {out_name}_mix.wav")
     return 0
 
 
-def np_log10(x):
-    import math
-    return 20 * math.log10(x)
-
-
 def main():
+    import math
     ap = argparse.ArgumentParser()
     ap.add_argument("project_dir")
     ap.add_argument("lead_pattern", default="", nargs="?")

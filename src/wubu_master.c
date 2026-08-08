@@ -219,15 +219,18 @@ int wubu_master_process(const WuBuMasterOpts *opts, float *lr, int n, int sr) {
             float xl1 = (i + 1 < n) ? lr[(i + 1) * 2] : xl0;
             float xr1 = (i + 1 < n) ? lr[(i + 1) * 2 + 1] : xr0;
             float tp = 0.0f;
-            for (int k = 0; k < 4; k++) {
-                float f = (float)k / 4.0f;
+            for (int k = 0; k < 8; k++) {
+                float f = (float)k / 8.0f;
                 float sl = fabsf(xl0 + (xl1 - xl0) * f);
                 float sr = fabsf(xr0 + (xr1 - xr0) * f);
                 if (sl > tp) tp = sl;
                 if (sr > tp) tp = sr;
             }
             float target = (tp * gain > ceiling) ? ceiling / tp : 1.0f;
-            float gnew = (target < gain) ? gain + att * (target - gain)
+            /* brick-wall: on overshoot snap the gain INSTANTLY (an attack
+             * ramp lets multi-sample transients through); smooth only the
+             * release back to unity. */
+            float gnew = (target < gain) ? target
                                          : gain + rel * (target - gain);
             gain = gnew;
             lr[i * 2] = xl0 * gain;
@@ -250,8 +253,8 @@ int wubu_master_process(const WuBuMasterOpts *opts, float *lr, int n, int sr) {
                 float xl0 = lr[i * 2] * gain, xr0 = lr[i * 2 + 1] * gain;
                 float xl1 = (i + 1 < n) ? lr[(i + 1) * 2] * gain : xl0;
                 float xr1 = (i + 1 < n) ? lr[(i + 1) * 2 + 1] * gain : xr0;
-                for (int k = 0; k < 4; k++) {
-                    float f = (float)k / 4.0f;
+                for (int k = 0; k < 8; k++) {
+                    float f = (float)k / 8.0f;
                     float sl = fabsf(xl0 + (xl1 - xl0) * f);
                     float sr = fabsf(xr0 + (xr1 - xr0) * f);
                     if (sl > peak) peak = sl;
