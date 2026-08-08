@@ -75,8 +75,8 @@ _dc._get_field = _patched_gf
 # --- end dataclass compat shim ---
 # fairseq's checkpoint_utils triggers an omegaconf 2.0.x / py3.11 crash
 # (_MISSING_TYPE). RVC voice conversion doesn't actually need fairseq --
-# load_hubert() is lazy (hubert_model=None and only called for HuBERT-based
-# feature extraction, which RVC's RMVPE path bypasses). So we inject a
+# we load hubert_base.pt with our own pure-torch HuBERT (wubu_hubert_torch)
+# which has the same extract_features/final_proj API. We inject a
 # barebones sys.modules stub so `from fairseq import checkpoint_utils`
 # succeeds without importing the real fairseq.
 import types as _t
@@ -87,34 +87,18 @@ if "fairseq" not in _s.modules:
 if "fairseq.checkpoint_utils" not in _s.modules:
     _cu = _t.ModuleType("fairseq.checkpoint_utils")
 
-    class _MockModel:
-        'Stub HuBERT model: pass-through features when real Hubert is absent. Quality reduced but pipeline survives.'
-        def to(self, *a, **kw): return self
-        def half(self): return self
-        def float(self): return self
-        def eval(self): return self
-        def extract_features(self, source, padding_mask=None, output_layer=None,
-                             *a, **kw):
-            # Real HuBERT returns [feats] where feats is [1, n_frames, 768].
-            # Without hubert_base.pt we stub this so the pipeline runs and
-            # RVC falls back gracefully if the conversion quality is poor.
-            import torch as _t
-            s = source
-            if s.dim() > 1:
-                s = s.flatten()
-            n = max(1, s.shape[0] // 320)
-            need = n * 768
-            if s.shape[0] < need:
-                s = _t.cat([s, _t.zeros(need - s.shape[0], device=s.device)])
-            feats = _t.zeros(1, n, 768, device=s.device, dtype=_t.float16)
-            for i in range(n):
-                chunk = s[i * 320:(i + 1) * 320].half()
-                feats[0, i, :chunk.shape[0]] = chunk
-            return [feats]
-        def final_proj(self, x): return x
+    def _load_real_hubert():
+        # Real HuBERT (pure torch, no fairseq): same extract_features API.
+        _s.path.insert(0, {wubu_tools_path})
+        from wubu_hubert_torch import HuBERT
+        import torch as _t2
+        model = HuBERT({hubert_path})
+        model.eval()
+        if {use_half}:
+            model = model.half()
+        return model
 
-    _mock = _MockModel()
-    _cu.load_model_ensemble_and_task = lambda *a, **k: ([_mock], None, None)
+    _cu.load_model_ensemble_and_task = lambda *a, **k: ([_load_real_hubert()], None, None)
     _cu.load_model_ensemble = lambda *a, **k: (None, None)
     _s.modules["fairseq.checkpoint_utils"] = _cu
 _s.argv = {argv}
@@ -124,7 +108,8 @@ _r.run_path({script_path}, run_name="__main__")
 
 
 def load_bank():
-    """152 trained voices: {'name': {'pth':..., 'index':..., 'path':...}}."""
+    """Trained voices: {'name': {'pth':..., 'index':..., 'path':...}}.
+    Falls back to the 30k voice-models catalog (resolve-by-name + URL)."""
     try:
         with open(VOICE_JSON) as f:
             return json.load(f).get("voices", {})
@@ -132,12 +117,47 @@ def load_bank():
         return {}
 
 
+class _RepoBank:
+    """Lazy 30k-catalog bank: same dict-like API as load_bank() but resolves
+    through tools/voice_repo.py, so ANY of the 30k voice-models voices are
+    addressable by casual name."""
+
+    def __init__(self):
+        self._repo = None
+
+    def _ensure(self):
+        if self._repo is None:
+            sys.path.insert(0, os.path.join(ROOT, "tools"))
+            from voice_repo import VoiceRepo
+            self._repo = VoiceRepo()
+        return self._repo
+
+    def __len__(self):
+        return self._ensure().count() or 0
+
+    def __iter__(self):
+        return iter({})
+
+    def get(self, key, default=None):
+        rec = self._ensure().resolve(key)
+        if not rec:
+            return default
+        # present the same shape the RVC class expects
+        return {"name": rec.get("name", key),
+                "pth": rec.get("pth", ""),
+                "index": rec.get("index", ""),
+                "download_url": rec.get("download_url", ""),
+                "version": rec.get("version", "v2")}
+
+
 class RVC:
     """Convert a source wav into one of the boss's voices. Lazy-loads on GPU."""
 
     def __init__(self, device="cuda", bank=None):
         self.device = "cuda" if device in ("cuda", "gpu", "0") else "cpu"
-        self.bank = bank or load_bank()
+        self.bank = bank
+        if self.bank is None:
+            self.bank = load_bank() or _RepoBank()
         self.engine = None       # "applio-cli" | "mangio-cli" | None
         self.ready = False
         self.error = None
@@ -166,15 +186,75 @@ class RVC:
         print("[rvc] disabled:", self.error, flush=True)
         return False
 
-    def resolve(self, name):
-        """Fuzzy-match a requested voice to the bank (boss talks casually)."""
+    def _scan_disk(self, name):
+        """Look for a locally downloaded model matching a voice name under
+        models/rvc/. The bank may only carry download_urls; if the model was
+        already fetched, use it directly."""
         n = (name or "").strip().lower()
-        if n in self.bank:
+        base = os.path.join(ROOT, "models", "rvc")
+        if not os.path.isdir(base):
+            return None
+        try:
+            for entry in sorted(os.listdir(base)):
+                d = os.path.join(base, entry)
+                if not os.path.isdir(d):
+                    continue
+                if n not in entry.lower() and entry.lower() not in n:
+                    continue
+                pth = None
+                idx = None
+                for f in sorted(os.listdir(d)):
+                    if f.lower().endswith(".pth"):
+                        pth = os.path.join(d, f)
+                    if f.lower().endswith((".index", ".big.npy")):
+                        idx = os.path.join(d, f)
+                if pth:
+                    return {"name": entry, "pth": pth,
+                            "index": idx or "", "version": "v2"}
+        except Exception:
+            pass
+        return None
+
+    def resolve(self, name):
+        """Fuzzy-match a requested voice: local bank first, then the 30k
+        voice-models catalog (repo bank). Boss talks casually."""
+        n = (name or "").strip().lower()
+        if n in self.bank and self.bank[n].get("pth"):
             return self.bank[n]
         hits = [v for k, v in self.bank.items() if n in k.lower()]
         if hits:
             hits.sort(key=lambda v: -int(bool(v.get("index"))))
+            # prefer a bank entry with a real local model
+            for v in hits:
+                if v.get("pth") and os.path.exists(v["pth"]):
+                    return v
+        # 3. locally downloaded model on disk
+        disk = self._scan_disk(name)
+        if disk:
+            return disk
+        if hits:
             return hits[0]
+        # 30k catalog fallback (only active when repo bank is engaged)
+        repo = self.bank if isinstance(self.bank, _RepoBank) else None
+        if repo is None and hasattr(self, "_repo_bank"):
+            repo = self._repo_bank
+        if repo is None:
+            try:
+                sys.path.insert(0, os.path.join(ROOT, "tools"))
+                from voice_repo import VoiceRepo
+                self._repo_bank = VoiceRepo()
+                repo = self._repo_bank
+            except Exception as e:
+                print(f"[rvc] voice repo unavailable: {e}", flush=True)
+                repo = None
+        if repo is not None:
+            rec = repo.resolve(name)
+            if rec:
+                return {"name": rec.get("name", name),
+                        "pth": rec.get("pth", ""),
+                        "index": rec.get("index", ""),
+                        "download_url": rec.get("download_url", ""),
+                        "version": rec.get("version", "v2")}
         return None
 
     def convert(self, wav_in, voice_name):
@@ -186,6 +266,11 @@ class RVC:
             print(f"[rvc] no voice matches {voice_name!r}", flush=True)
             return wav_in
         self.last_voice = v["name"]
+        if not v.get("pth"):
+            url = v.get("download_url") or ""
+            print(f"[rvc] {v['name']!r} has no local model on disk."
+                  + (f" Download: {url}" if url else ""), flush=True)
+            return wav_in
         if not self._boot():
             return wav_in
         t = time.time()
@@ -278,6 +363,9 @@ class RVC:
             argv=argv,
             mangio_path=repr(MANGIO),
             script_path=repr(script_path),
+            wubu_tools_path=repr(os.path.join(ROOT, "tools")),
+            hubert_path=repr(os.path.join(ROOT, "models", "rvc", "hubert_base.pt")),
+            use_half=repr(True),
         )
         with tempfile.TemporaryDirectory() as td:
             wrapper_path = os.path.join(td, "_rvc_wrap.py")
@@ -285,8 +373,10 @@ class RVC:
                 wf.write(source)
             cmd = [sys.executable, wrapper_path]
             try:
+                # Real HuBERT + RMVPE on a 2080 SUPER: ~12 min for 2.78s audio
+                # at Mangio's windowed conversion rate. 120s was far too short.
                 r = subprocess.run(cmd, capture_output=True,
-                                   text=True, timeout=120,
+                                   text=True, timeout=1500,
                                    cwd=MANGIO)
                 # Mangio writes to output_dir/<basename>; copy it to `out`
                 # so the caller gets a predictable single-file path.

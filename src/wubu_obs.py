@@ -433,6 +433,47 @@ class ObsCohost:
             pass
         return state
 
+    def update_training_status(self, status=None, training=None):
+        """Update the training/vital-signs status in face_state.json.
+
+        Merges with existing state (mood, text, etc.) so the overlay doesn't
+        lose its current display. Used by training pipelines to show:
+          - status: voice, cuda, lessons, rps (existing vital signs)
+          - training: model name, epoch, step, loss, voices, queue, gpu_util
+
+        Example training dict:
+          {"model": "Cartman v2", "epoch": 87, "epochs": 100,
+           "step": 21000, "loss": 0.045, "voices": 23,
+           "queue": 5, "gpu_util": 94}
+        """
+        face_dir = os.environ.get("WUBU_FACE_DIR",
+                                 r"C:/Users/eman5/WuBuMedia/face")
+        face_path = os.path.join(face_dir, "face_state.json")
+
+        # Read existing state, merge, write back atomically
+        existing = {}
+        try:
+            with open(face_path) as f:
+                existing = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        if status is not None:
+            existing["status"] = {**existing.get("status", {}), **status}
+        if training is not None:
+            existing["status"] = existing.get("status", {})
+            existing["status"]["training"] = training
+
+        try:
+            os.makedirs(face_dir, exist_ok=True)
+            tmp = face_path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(existing, f, indent=2)
+            os.replace(tmp, face_path)
+        except OSError:
+            pass
+        return existing
+
 
 def main():
     pw = os.environ.get("OBS_WS_PASSWORD")

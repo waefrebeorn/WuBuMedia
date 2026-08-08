@@ -275,7 +275,7 @@ static int rvc_run_pipeline(WuBuRVC *rvc,
                 for (int c = 0; c < mel_ch && c < 256; c++)
                     gen_input[(size_t)f * 256 + c] = mel_input[(size_t)f * mel_ch + c];
             n_audio = wubu_kernel_hifigan_exact(rvc->model, gen_input,
-                                                n_frames, gen_out, max_audio);
+                                                n_frames, gen_out, max_audio, 0);
             if (n_audio > 0)
                 memcpy(output, gen_out, (size_t)n_audio * sizeof(float));
             else

@@ -156,7 +156,7 @@ int main(int argc, char **argv) {
                 "         --noise S     : noise scale (0.0 = deterministic, 0.66666 = reference)\n"
                 "         --hubert PATH : override HuBERT weights path\n"
                 "         --preset N    : character preset (1=warm, 2=bright, 3=smooth, 4=breaty)\n"
-                "         --snake       : use Snake+LReLU activation (BigVGAN)\n"
+                "         --snake       : use Snake activation (BigVGAN: x + (1/a)sin^2(a*x))\n"
                 "         --formant R   : formant shift ratio (1.0=none, <1=male, >1=female)\n"
                 "         --f0smooth S  : F0 contour smoothing strength (0.0-1.0)\n",
                 argv[0]);
@@ -172,7 +172,7 @@ int main(int argc, char **argv) {
     int speaker_id = 0;       /* default: speaker 0 */
     float noise_scale = 0.0f; /* default: deterministic (parity mode) */
     int preset = 0;           /* 0 = none, 1-4 = character preset */
-    int use_snake = 0;        /* 0 = LeakyReLU (original), 1 = Snake+LReLU (BigVGAN) */
+    int use_snake = 0;        /* 0 = LeakyReLU (original), 1 = Snake (BigVGAN) */
     float formant_shift = 1.0f; /* 1.0 = no shift */
     float f0_smooth = 0.0f;   /* 0.0 = no smoothing */
     snprintf(model_path, sizeof(model_path), "%s/model.pth", model_dir);
@@ -338,14 +338,61 @@ int main(int argc, char **argv) {
     t0 = clock();
     int n_out = wubu_rvc_synthesize_real(rvc->model, cmaj, n_frames, content_dim,
                                          f0_coarse, nsff0, speaker_id, noise_scale,
-                                         out_audio, max_audio);
+                                         out_audio, max_audio, use_snake);
     double synth_s = (double)(clock() - t0) / CLOCKS_PER_SEC;
     if (n_out <= 0) die("synth failed");
+
+    /* Snake safety (2026-08-07): pretrained RVC weights were trained with
+     * LeakyReLU. Snake (~identity) removes LReLU's negative compression, so
+     * the MRF residual stacks compound and the final tanh saturates to a
+     * pure square wave (verified: sat_frac=1.000). Fall back to the
+     * parity-verified LeakyReLU path instead of emitting a square wave. */
+    if (use_snake && rvc->model && rvc->model->last_snake_sat > 0.5f) {
+        fprintf(stderr, "WARNING: Snake activation saturates the generator "
+                        "(sat_frac=%.3f) — incompatible with LeakyReLU-trained "
+                        "weights. Falling back to LeakyReLU (parity-verified).\n",
+                rvc->model->last_snake_sat);
+        use_snake = 0;
+        free(out_audio);
+        out_audio = (float *)malloc((size_t)max_audio * sizeof(float));
+        if (!out_audio) die("alloc");
+        t0 = clock();
+        n_out = wubu_rvc_synthesize_real(rvc->model, cmaj, n_frames, content_dim,
+                                         f0_coarse, nsff0, speaker_id, noise_scale,
+                                         out_audio, max_audio, use_snake);
+        synth_s = (double)(clock() - t0) / CLOCKS_PER_SEC;
+        if (n_out <= 0) die("synth failed (LeakyReLU fallback)");
+    }
     printf("     synth: %.2f s (%.2fx realtime)\n", synth_s,
            synth_s / ((double)n_out / sr_out));
 
-    /* 6. post-processing pipeline */
+    /* 6. post-processing: normalize then apply character preset */
     if (preset > 0 && preset <= 4) {
+        /* Debug: show synthesis output stats */
+        float _syn_peak = 0, _syn_rms = 0;
+        for (int i = 0; i < n_out; i++) {
+            float a = fabsf(out_audio[i]);
+            if (a > _syn_peak) _syn_peak = a;
+            _syn_rms += out_audio[i] * out_audio[i];
+        }
+        _syn_rms = sqrtf(_syn_rms / (float)n_out);
+        fprintf(stderr, "[synth-output] peak=%.4f rms=%.4f mean=%.6f\n",
+                _syn_peak, _syn_rms, 0.0f); /* mean not computed for speed */
+        /* Normalize synthesis output to consistent peak level.
+         * The NSF sine generator can produce widely varying output levels
+         * depending on random noise; normalize to consistent peak for postproc. */
+        if (_syn_peak > 0.001f) {
+            /* Normalize to RMS ~0.1 (typical speech level) for consistent post-processing.
+             * The NSF generator may produce clipped output (RMS=1.0) with Snake activation;
+             * normalize to a safe level before EQ/saturation to avoid clipping. */
+            float _syn_rms = 0;
+            for (int i = 0; i < n_out; i++) _syn_rms += out_audio[i] * out_audio[i];
+            _syn_rms = sqrtf(_syn_rms / (float)n_out);
+            if (_syn_rms > 1e-10f) {
+                float _scale = 0.1f / _syn_rms;
+                for (int i = 0; i < n_out; i++) out_audio[i] *= _scale;
+            }
+        }
         float *pp = (float *)malloc((size_t)n_out * sizeof(float));
         if (pp) {
             wubu_apply_character_preset(out_audio, pp, n_out, sr_out, preset);

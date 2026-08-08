@@ -486,13 +486,25 @@ function applyState(s){
   // --- cohost vital signs (transparency: let the stream see it think) ---
   if(s.status && statEl){
     const st=s.status;
-    statEl.textContent=[
+    const parts=[
       st.voice ? `voice:${st.voice}` : '',
       st.cuda ? `gpu:${st.cuda}` : '',
       st.lessons!=null ? `lessons:${st.lessons}` : '',
       st.rps ? `${st.rps}ms` : ''
-    ].filter(Boolean).join('  ');
-    statEl.classList.toggle('on', Boolean(st.voice||st.cuda||st.lessons!=null));
+    ];
+    // Training dashboard status (shows when training is active)
+    if(st.training){
+      const tr = st.training;
+      parts.push(`TRAIN:${tr.model||'?'}`);
+      if(tr.epoch!=null && tr.epochs!=null) parts.push(`ep:${tr.epoch}/${tr.epochs}`);
+      if(tr.step!=null) parts.push(`step:${tr.step}`);
+      if(tr.loss!=null) parts.push(`loss:${tr.loss}`);
+      if(tr.voices!=null) parts.push(`voices:${tr.voices}`);
+      if(tr.queue!=null) parts.push(`queue:${tr.queue}`);
+      if(tr.gpu_util!=null) parts.push(`gpu:${tr.gpu_util}%`);
+    }
+    statEl.textContent = parts.filter(Boolean).join('  ');
+    statEl.classList.toggle('on', Boolean(st.voice||st.cuda||st.lessons!=null||st.training));
   }
 }
 

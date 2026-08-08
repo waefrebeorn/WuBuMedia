@@ -214,6 +214,7 @@ struct WuBuRVCModel {
     int   version_loaded;     /* RVC version (1 or 2) */
     float last_loss;          /* last training loss */
     int   last_epoch;         /* last training epoch */
+    float last_snake_sat;     /* snake run: fraction of samples at tanh saturation (0..1) */
     int   vocoder_type;       /* 0 = HiFi-GAN, 1 = BigVGAN, 2 = MRF-HiFiGAN */
     int   vocal_separator;    /* 0 = none, 1 = UVR5, 2 = MDX-Net, 3 = Demucs */
 
@@ -280,7 +281,8 @@ int wubu_kernel_hifigan_exact(const WuBuRVCModel *model,
                                const float *mel_input,
                                int n_frames,
                                float *output,
-                               int max_output);
+                               int max_output,
+                               int use_snake);
 
 /* Synthesize audio from content features + F0.
  * Full RVC pipeline: content → flow posterior → generator → HiFi-GAN.

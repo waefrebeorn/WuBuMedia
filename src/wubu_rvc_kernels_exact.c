@@ -110,20 +110,20 @@ static void lrelu(float *data, size_t n) {
 }
 
 /* ── Snake activation (BigVGAN): f(x) = x + (1/α)sin²(αx) ──
- * Provides periodic inductive bias for audio signals.
- * α=1 is the standard BigVGAN choice. */
+ * Periodic inductive bias for audio signals. α=1 is the standard choice.
+ * NOTE (2026-08-07, crash recovery): this is f(x) ALONE — adding LeakyReLU
+ * on top (f = snake + lrelu ≈ 2x for x>0) doubles the signal each MRF
+ * stage, blows up activations through 4 stages, saturates the final tanh
+ * and produces a square wave (pitch CV 0.0014). BigVGAN's Snake module is
+ * exactly x + (1/α)sin²(αx); there is no LReLU term. */
 static inline float snake(float x, float a) {
     return x + (1.0f / a) * sinf(a * x) * sinf(a * x);
 }
 
-/* ── Snake + LeakyReLU combined (BigVGAN): f(x) = Snake(x) + LReLU(x) ──
- * This is the BigVGAN activation that improves audio quality over LReLU alone. */
+/* ── Snake activation applied in place (BigVGAN, no LReLU term) ── */
 static void snake_lrelu(float *data, size_t n) {
     for (size_t i = 0; i < n; i++) {
-        float x = data[i];
-        float s = snake(x, 1.0f);        /* periodic component */
-        float lr = x > 0 ? x : 0.1f * x;  /* leaky ReLU component */
-        data[i] = s + lr;
+        data[i] = snake(data[i], 1.0f);
     }
 }
 
@@ -143,21 +143,23 @@ static void mrf_resblock_pair(const float *input, int ch, int n, int k_size,
                                int dil1,
                                const float *conv1_w, const float *conv1_b,
                                const float *conv2_w, const float *conv2_b,
-                               float *output)
+                               float *output, int use_snake)
 {
-    /* 1. LeakyReLU on input */
+    /* 1. Activation on input */
     float *tmp = (float *)malloc((size_t)ch * n * sizeof(float));
     if (!tmp) { memcpy(output, input, (size_t)ch * n * sizeof(float)); return; }
     memcpy(tmp, input, (size_t)ch * n * sizeof(float));
-    lrelu(tmp, (size_t)ch * n);
+    if (use_snake) snake_lrelu(tmp, (size_t)ch * n);
+    else lrelu(tmp, (size_t)ch * n);
 
     /* 2. conv1 (dilated) */
     int pad1 = dil1 * (k_size - 1) / 2;
     conv1d(tmp, ch, conv1_w, conv1_b, ch, k_size, 1, pad1, dil1, n, output);
     free(tmp);
 
-    /* 3. LeakyReLU after conv1 */
-    lrelu(output, (size_t)ch * n);
+    /* 3. Activation after conv1 */
+    if (use_snake) snake_lrelu(output, (size_t)ch * n);
+    else lrelu(output, (size_t)ch * n);
 
     /* 4. conv2 (dilation=1) → + residual */
     float *tmp2 = (float *)malloc((size_t)ch * n * sizeof(float));
@@ -173,7 +175,7 @@ static void mrf_resblock_pair(const float *input, int ch, int n, int k_size,
 /* ── Apply MRF to a stage: average over 3 resblock stacks ── */
 static void apply_mrf_stage(const float *input, int ch, int n,
                              int stage_idx, const WuBuRVCModel *model,
-                             float *output)
+                             float *output, int use_snake)
 {
     int dilations[3] = {1, 3, 5};
     int num_stacks = 3;
@@ -217,7 +219,7 @@ static void apply_mrf_stage(const float *input, int ch, int n,
                                    (c1b_t && c1b_t->data) ? c1b_t->data : NULL,
                                    c2w_t->data,
                                    (c2b_t && c2b_t->data) ? c2b_t->data : NULL,
-                                   stack_out);
+                                   stack_out, use_snake);
                 memcpy(tmp_in, stack_out, (size_t)ch * n * sizeof(float));
             }
         }
@@ -240,7 +242,8 @@ int wubu_kernel_hifigan_exact(const WuBuRVCModel *model,
                                const float *mel_input,
                                int n_frames,
                                float *output,
-                               int max_output)
+                               int max_output,
+                               int use_snake)
 {
     if (!model || !model->loaded || !mel_input || !output)
         return -1;
@@ -299,7 +302,7 @@ int wubu_kernel_hifigan_exact(const WuBuRVCModel *model,
                       ups_rates[0], ups_pads[0], n_cur, buf0);
     free(pre_out);
     /* NO lrelu here — PyTorch does: x = ups[i](x) → MRF(x), lrelu is inside ResBlock */
-    apply_mrf_stage(buf0, ups_out_ch[0], n0, 0, model, buf0);
+    apply_mrf_stage(buf0, ups_out_ch[0], n0, 0, model, buf0, use_snake);
 
     /* Steps 4-6: Stages 1-3 */
     float *prev = buf0;
@@ -331,7 +334,7 @@ int wubu_kernel_hifigan_exact(const WuBuRVCModel *model,
                           ups_in_ch[L], ups_out_ch[L], ups_kernels[L],
                           ups_rates[L], ups_pads[L], prev_n, layer_bufs[L - 1]);
         /* NO lrelu here — PyTorch does: x = ups[i](x) → MRF(x), lrelu is inside ResBlock */
-        apply_mrf_stage(layer_bufs[L - 1], ups_out_ch[L], n_next, L, model, layer_bufs[L - 1]);
+        apply_mrf_stage(layer_bufs[L - 1], ups_out_ch[L], n_next, L, model, layer_bufs[L - 1], use_snake);
         prev = layer_bufs[L - 1];
         prev_n = n_next;
     }

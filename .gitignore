@@ -1,26 +1,51 @@
-# secrets / tokens
-*.token
-.env
-.env.*
-*_SECRET*
-credentials*
-id_ed25519*
-# agent proofs / local state
-guard_last.json
-face_state.json
-knowledge/rig_state.json
-# build artifacts
-*.o
-*.obj
-*.exe
-*.log
-build_log.txt
-link_log.txt
-nul
-# MSVC banner / cl temp files leaked by wubu_world_*.bat
-# (native engine is built out-of-tree under D:/engines/box3d/build)
-wubu_world.exe
+# Voice model binaries (stored on D: drive)
+voice_models/downloaded/*/models/
+
+# Large data files
+models/vm_full_index.json
+models/voice_catalog.json
+out/vm_models_ranked.json
+out/vm_sorted_by_popularity.json
+models/rvc/
+models/vm_*.json
+models/vm_*.txt
+models/all_voice_dirs.txt
+models/voice_download_matches.json
+models/voice_models_sitemap_urls.txt
+models/training_assets_manifest.json
+models/popular_english_voices.json
+models/piper/
+
+# Build artifacts
+build/*.o
+build/*.exe
+build/*.log
+build/*.dll
+
+# Python
+.venv/
 __pycache__/
+*.pyc
+
+# Output audio
+outputs/*.wav
+outputs/*.npy
+outputs/*.mp4
+outputs/*.log
+outputs/rvc_ref/
+
+# Cohost runtime state
 face/cohost_line.wav
+face/face_state.json
+face/*.log
+
+# Temp
+tools/__pycache__/
 .venv_win/
+knowledge/rvc_original/
+knowledge/rvc_mangio/
+knowledge/rig_state.json
+knowledge/self_improvement.log
+
+# Out-of-tree scratch / browser test dumps
 out/

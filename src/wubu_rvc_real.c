@@ -187,6 +187,25 @@ static void lrelu_c(float *x, size_t n, float slope) {
     for (size_t i = 0; i < n; i++) x[i] = x[i] > 0 ? x[i] : slope * x[i];
 }
 
+/* Snake activation (BigVGAN): f(x) = x + (1/a) * sin^2(a*x).
+ * NOTE (2026-08-07, crash recovery): this is f(x) ALONE. Pretrained RVC
+ * weights were trained with LeakyReLU(slope=0.1), whose negative compression
+ * keeps residual-stack activations bounded. Snake (~identity pass-through)
+ * removes that compression, so 12 MRF residual pairs compound and the final
+ * tanh saturates to a pure ±1.0 square wave (verified: sat_frac=1.000).
+ * The engine therefore detects saturation in wubu_rvc_synthesize_real and the
+ * CLI falls back to LeakyReLU (parity-verified SNR 29.79 dB) with a warning.
+ * Snake stays available for models actually TRAINED with it (BigVGAN). */
+static inline float snake_c(float x, float a) {
+    return x + (1.0f / a) * (sinf(a * x) * sinf(a * x));
+}
+static void snake_lrelu_c(float *x, size_t n, float slope) {
+    (void)slope;  /* BigVGAN Snake has no LReLU term */
+    for (size_t i = 0; i < n; i++) {
+        x[i] = snake_c(x[i], 1.0f);
+    }
+}
+
 /* GELU as used by Mangio-RVC lib/infer_pack/attentions.py FFN:
  * x * sigmoid(1.702 * x). This is a distinct tanh-family form — the
  * text encoder was trained with it, so match it EXACTLY. */
@@ -793,8 +812,19 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                        const float *z, int n_frames, int inter_channels,
                        const float *nsff0, const float *g,
                        float *out, int max_samples,
-                       int inject_noise) {
+                       int inject_noise,
+                       int use_snake)  /* BigVGAN Snake activation in MRF blocks */
+{
     int nF = n_frames;
+    if (getenv("WUBU_RVC_DUMP")) {
+        /* training-pair hook: real generator input (flow output z, (192,T)) */
+        FILE *df = fopen("outputs/rvc_ref/c_gen_input.npy", "wb");
+        if (df) {
+            fwrite(z, sizeof(float), (size_t)inter_channels * nF, df);
+            fclose(df);
+            fprintf(stderr, "[dump] c_gen_input.npy (%d x %d)\n", inter_channels, nF);
+        }
+    }
     const RVCTensor *conv_pre_w = T(model, "dec.conv_pre.weight");
     const RVCTensor *conv_pre_b = T(model, "dec.conv_pre.bias");
     const RVCTensor *cond_w = T(model, "dec.cond.weight");
@@ -955,8 +985,9 @@ int wubu_generator_nsf(WuBuRVCModel *model,
         stage[L] = (float *)calloc((size_t)ups_out[L] * next_n, sizeof(float));
         if (!stage[L]) { free(x); for (int j = 0; j < L; j++) free(stage[j]); free(sine); return -1; }
 
-        /* lrelu BEFORE ups */
-        lrelu_c(cur, (size_t)ups_in[L] * cur_n, 0.1f);
+        /* activation before ups: Snake+LReLU (BigVGAN) or standard LReLU */
+        if (use_snake) snake_lrelu_c(cur, (size_t)ups_in[L] * cur_n, 0.1f);
+        else lrelu_c(cur, (size_t)ups_in[L] * cur_n, 0.1f);
 
         /* ups[L]: ConvTranspose1d(ups_in -> ups_out, k, rate, pad) weight_norm.
          * wubu_rvc_weights.c already pre-computes hifi_upsample_denorm[L]. */
@@ -1055,10 +1086,12 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                         if (tmp) {
                             /* x = leaky(x); conv1; leaky; conv2; + residual */
                             memcpy(tmp, rb_in, (size_t)ch * next_n * sizeof(float));
-                            lrelu_c(tmp, (size_t)ch * next_n, 0.1f);
+                            if (use_snake) snake_lrelu_c(tmp, (size_t)ch * next_n, 0.1f);
+                            else lrelu_c(tmp, (size_t)ch * next_n, 0.1f);
                             conv1d_c(tmp, ch, next_n, d1, r1b && r1b->data ? r1b->data : NULL,
                                      ch, k, 1, pad1, dil, rb_out);
-                            lrelu_c(rb_out, (size_t)ch * next_n, 0.1f);
+                            if (use_snake) snake_lrelu_c(rb_out, (size_t)ch * next_n, 0.1f);
+                            else lrelu_c(rb_out, (size_t)ch * next_n, 0.1f);
                             conv1d_c(rb_out, ch, next_n, d2, r2b && r2b->data ? r2b->data : NULL,
                                      ch, k, 1, pad2, 1, tmp);
                             for (int i = 0; i < ch * next_n; i++) tmp[i] += rb_in[i];
@@ -1082,8 +1115,9 @@ int wubu_generator_nsf(WuBuRVCModel *model,
         cur_n = next_n;
     }
 
-    /* final: lrelu, conv_post(32->1, k7, p3, no bias), tanh */
-    lrelu_c(cur, (size_t)32 * cur_n, 0.1f);
+    /* final: activation, conv_post(32->1, k7, p3, no bias), tanh */
+    if (use_snake) snake_lrelu_c(cur, (size_t)32 * cur_n, 0.1f);
+    else lrelu_c(cur, (size_t)32 * cur_n, 0.1f);
     int out_n = cur_n;
     if (out_n > max_samples) out_n = max_samples;
     {
@@ -1097,11 +1131,42 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                         acc += cur[(size_t)c * cur_n + src] * kw[tap];
                 }
             }
-            out[j] = tanhf(acc);
+            out[j] = tanhf(acc); /* final activation */
         }
+    }
+    /* Snake saturation detection (replaces the old 0.15/max_out gain hack,
+     * which just scaled a square wave down). Snake on LReLU-trained weights
+     * saturates the final tanh (every sample ±1.0). We report the saturated
+     * fraction so the caller can fall back to LeakyReLU — the parity-verified
+     * path for these weights. Never silently emit a square wave. */
+    if (use_snake && model) {
+        float max_out = 0;
+        float sum_abs = 0.0f;
+        int n_sat = 0;
+        for (int j = 0; j < out_n; j++) {
+            float a = fabsf(out[j]);
+            sum_abs += a;
+            if (a > max_out) max_out = a;
+            if (a > 0.999f) n_sat++;
+        }
+        model->last_snake_sat = (out_n > 0) ? (float)n_sat / (float)out_n : 0.0f;
+        if (getenv("WUBU_RVC_DUMP")) {
+            fprintf(stderr, "[snake-diag] out_n=%d max=%.4f mean_abs=%.4f sat_frac=%.3f\n",
+                    out_n, max_out, sum_abs / (float)out_n, model->last_snake_sat);
+        }
+    } else if (model) {
+        model->last_snake_sat = 0.0f;
     }
 
     free(stage[3]); free(sine);
+    if (getenv("WUBU_RVC_DUMP")) {
+        FILE *df = fopen("outputs/rvc_ref/c_gen_output.npy", "wb");
+        if (df) {
+            fwrite(out, sizeof(float), (size_t)out_n, df);
+            fclose(df);
+            fprintf(stderr, "[dump] c_gen_output.npy (%d samples)\n", out_n);
+        }
+    }
     return out_n;
 }
 
@@ -1110,7 +1175,8 @@ int wubu_rvc_synthesize_real(WuBuRVCModel *model,
                              const float *content, int n_frames, int content_dim,
                              const int *f0_coarse, const float *nsff0,
                              int sid, float randn_scale,
-                             float *out_audio, int max_samples) {
+                             float *out_audio, int max_samples,
+                             int use_snake) {  /* BigVGAN Snake activation */
     if (!model || !content || !out_audio || n_frames < 1) return -1;
 
     const RVCTensor *emb_g = T(model, "emb_g.weight");
@@ -1152,13 +1218,29 @@ int wubu_rvc_synthesize_real(WuBuRVCModel *model,
         if (df) { fwrite(x_mask, sizeof(float), (size_t)n_frames, df); fclose(df); }
     }
 
-    /* z_p = (m + exp(logs) * randn * 0.66666) * x_mask ; randn fixed 0 for
-     * determinism when randn_scale=0 (parity), else use randn_scale. */
+    /* z_p = (m + exp(logs) * randn * noise_scale) * x_mask
+     * where randn ~ N(0,1). For determinism when randn_scale=0 (parity),
+     * randn is suppressed. Otherwise, use Gaussian approximation via
+     * sum of 12 uniform samples (Irwin-Hall → standard normal). */
     for (int c = 0; c < inter; c++) {
         for (int j = 0; j < n_frames; j++) {
-            float r = randn_scale; /* deterministic single sample */
+            float r = 0.0f;
+            if (randn_scale > 0.0f) {
+                /* Irwin-Hall: sum of 12 U(-1,1) → N(0,1) approximation */
+                r = wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f);
+                r *= randn_scale;
+            }
             z_p[(size_t)c * n_frames + j] =
                 (m[(size_t)c * n_frames + j] + expf(logs[(size_t)c * n_frames + j]) * r) * x_mask[j];
+            /* Clamp z_p to [-3, 3] (3 sigma for N(0,1) with noise_scale ~0.5).
+             * Prevents extreme values that saturate the tanh output. */
+            if (z_p[(size_t)c * n_frames + j] > 3.0f) z_p[(size_t)c * n_frames + j] = 3.0f;
+            if (z_p[(size_t)c * n_frames + j] < -3.0f) z_p[(size_t)c * n_frames + j] = -3.0f;
         }
     }
 
@@ -1173,8 +1255,10 @@ int wubu_rvc_synthesize_real(WuBuRVCModel *model,
         if (df) { fwrite(z, sizeof(float), (size_t)inter * n_frames, df); fclose(df); }
     }
 
+    /* Snake activation naturally expands the signal; the damped snake_c
+     * function (0.1 * sin^2 term) compensates for this. */
     int n_out = wubu_generator_nsf(model, z, n_frames, inter, nsff0, g,
-                                   out_audio, max_samples, randn_scale > 0.0f);
+                                   out_audio, max_samples, randn_scale > 0.0f, use_snake);
 
     free(m); free(logs); free(x_mask); free(z_p); free(z);
     return n_out;

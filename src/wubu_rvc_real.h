@@ -51,7 +51,8 @@ int wubu_rvc_synthesize_real(WuBuRVCModel *model,
                              const float *content, int n_frames, int content_dim,
                              const int *f0_coarse, const float *nsff0,
                              int sid, float randn_scale,
-                             float *out_audio, int max_samples);
+                             float *out_audio, int max_samples,
+                             int use_snake);
 
 /* ── TextEncoder768 / TextEncoder256 (enc_p) ──
  * Returns 0 on success. m/logs are [n_frames * inter_channels] each. */
@@ -74,7 +75,8 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                        const float *z, int n_frames, int inter_channels,
                        const float *nsff0, const float *g,
                        float *out, int max_samples,
-                       int inject_noise);
+                       int inject_noise,
+                       int use_snake);
 
 #ifdef __cplusplus
 }
