@@ -195,11 +195,11 @@ def main():
     out_mp4 = sys.argv[1]
     wavs = sys.argv[2:]
     labels = [
-        ("FIXED pipeline · LeakyReLU det", "nearest content ×2 + f0 at 100fps (1:1) — was: linear content + f0 ×2 compression"),
-        ("FIXED pipeline · LeakyReLU noise 0.666", "same fixes + natural NSF noise injection"),
-        ("FIXED pipeline · Snake→fallback det", "snake auto-fallback to LeakyReLU (identical output)"),
-        ("FIXED pipeline · Snake→fallback noise", "snake auto-fallback — no square wave"),
-        ("GOLD STANDARD · ref RMVPE f0", "f0 from the PyTorch/Mangio reference — what the model expects"),
+        ("FINAL · RMVPE f0 · LeakyReLU det", "training-time RMVPE f0 in C11 (corr 0.999 vs Python) + nearest content ×2 + f0 1:1"),
+        ("FINAL · RMVPE f0 · LeakyReLU noise", "same + natural NSF noise injection"),
+        ("FINAL · RMVPE f0 · Snake→fallback det", "snake auto-fallback to LeakyReLU (identical output)"),
+        ("FINAL · RMVPE f0 · Snake→fallback noise", "snake auto-fallback — no square wave"),
+        ("GOLD STANDARD · PyTorch Mangio", "reference from the verified PyTorch pipeline (corr 0.9999)"),
     ]
     with tempfile.TemporaryDirectory() as td:
         segs = []

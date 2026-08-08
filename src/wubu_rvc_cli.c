@@ -28,6 +28,7 @@
 #include "wubu_rvc_real.h"
 #include "wubu_rvc_hubert.h"
 #include "wubu_rvc_f0.h"
+#include "wubu_rmvpe.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -176,6 +177,7 @@ int main(int argc, char **argv) {
     float formant_shift = 1.0f; /* 1.0 = no shift */
     float f0_smooth = 0.0f;   /* 0.0 = no smoothing */
     char f0ref_dir[1024] = {0}; /* reference f0 dir (nsff0_raw.bin + f0_coarse.bin) */
+    int force_yin = 0;        /* --f0 yin: force YIN instead of RMVPE */
     snprintf(model_path, sizeof(model_path), "%s/model.pth", model_dir);
     for (int a = 4; a < argc - 1; a++) {
         if (strcmp(argv[a], "--model") == 0) {
@@ -203,6 +205,9 @@ int main(int argc, char **argv) {
             a++;
         } else if (strcmp(argv[a], "--f0ref") == 0) {
             snprintf(f0ref_dir, sizeof(f0ref_dir), "%s", argv[a + 1]);
+            a++;
+        } else if (strcmp(argv[a], "--f0") == 0 && strcmp(argv[a + 1], "yin") == 0) {
+            force_yin = 1;
             a++;
         }
     }
@@ -343,8 +348,22 @@ int main(int argc, char **argv) {
         n_f0_2 = n_f0;
         printf("[5] f0 from reference (%d frames @100fps)\n", n_f0);
     } else {
-        n_f0 = wubu_f0_yin(pcm16, n16, 16000, 1024, 160, 50.0f, 1100.0f, f0, n16 / 160 + 2);
-        printf("[5] yin f0 frames: %d\n", n_f0);
+        /* default: RMVPE (the training-time extractor — coarse bins match the
+         * model's conditioning distribution). Fall back to YIN if the weights
+         * are missing or --f0 yin was passed. */
+        WuBuRmvpe *rm = NULL;
+        if (!force_yin) {
+            rm = wubu_rmvpe_load("models/rvc/rmvpe_weights.bin");
+            if (rm) {
+                n_f0 = wubu_rmvpe_f0(rm, pcm16, n16, f0, n16 / 160 + 8);
+                printf("[5] rmvpe f0 frames: %d\n", n_f0);
+            }
+        }
+        if (!rm || n_f0 <= 0) {
+            n_f0 = wubu_f0_yin(pcm16, n16, 16000, 1024, 160, 50.0f, 1100.0f, f0, n16 / 160 + 2);
+            printf("[5] yin f0 frames: %d\n", n_f0);
+        }
+        if (rm) wubu_rmvpe_free(rm);
         f0_coarse = (int *)malloc((size_t)(n_f0 + 2) * sizeof(int));
         nsff0 = (float *)malloc((size_t)(n_f0 + 2) * sizeof(float));
         wubu_f0_to_coarse(f0, n_f0, 50.0f, 1100.0f, f0_coarse, nsff0);

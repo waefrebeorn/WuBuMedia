@@ -27,27 +27,34 @@ The CLI's `upsample_frames` used linear interpolation with
 
 **Fix:** `upsample_frames` now repeats each frame twice (nearest).
 
-## Bug 3 (OPEN): YIN f0 vs training-time RMVPE f0
+## Bug 3 (FIXED 2026-08-07): YIN f0 → RMVPE ported to C11
 
-After fixing 1+2, the CLI with reference f0 produces output correlating
-**0.9999** with the PyTorch reference — the pipeline is correct. But YIN
-f0 vs RMVPE f0 land in the same coarse bin only **22.8%** of voiced frames
-(mean bin diff 1.71, 49% off by 2+ bins). The flow conditioning consumes
-coarse bins (emb_f0 lookup), so ~77% of frames get a different conditioning
-than training → the voice is subtly but pervasively wrong.
+YIN f0 landed in the same coarse bin as RMVPE only 22.8% of voiced frames —
+the flow's emb_f0 conditioning diverged from training distribution → wrong
+voice. Fixed by porting **RMVPE** to C11 (exact match for this model):
 
-YIN Hz correlation is 0.971 / 6 Hz mean diff — but bin-level agreement is
-what matters for the model. RMVPE (rmvpe.pt, 181 MB, U-Net + bidirectional
-GRU, 741 tensors) is the extractor the reference used; FCPE (fcpe.gguf,
-43 MB) is the modern RVC default. Porting one of them to C11 is the
-definitive fix (RMVPE = exact match for this model).
+- `src/wubu_stft.c/.h` — self-contained STFT (torch.stft center=True, hann
+  periodic) + mel filterbank.
+- `src/wubu_gru.c/.h` — self-contained BiGRU (PyTorch gate order r,z,n; the
+  reset gate must gate the HIDDEN term — the first version forgot `r`).
+- `src/wubu_rmvpe.c/.h` — DeepUnet (5-enc/4-inter/5-dec, 2D conv/BN/pool/
+  convT) + cnn + BiGRU + Linear(512→360) + cents decode.
+- `tools/extract_rmvpe_weights.py` — rmvpe.pt → rmvpe_weights.bin (362 MB,
+  742 tensors incl. librosa htk mel basis).
+- `src/test_rmvpe.c` — verifies vs Python RMVPE: **corr 0.9999, 168/168
+  voiced, mean diff 0.19 Hz** (GRU corr 0.99994).
+
+CLI now uses RMVPE by default (`--f0 yin` forces YIN fallback). Coarse-bin
+agreement vs training distribution: 96% (YIN was 23%). Output correlates
+0.70 with the gold standard (was 0.016 with YIN; 0.9999 with exact f0).
 
 ## Status
 
-- CLI fixes committed: nearest content upsample + f0 1:1 (no ×2).
-- `--f0ref DIR` flag: verify with reference f0 (nsff0_raw.bin +
-  f0_coarse.bin raw dumps).
-- Remaining: RMVPE/FCPE C11 port → replace YIN as default f0.
+- All three robot-voice bugs FIXED: nearest content ×2, f0 1:1 (no ×2),
+  RMVPE f0 in C11 (default).
+- `--f0ref DIR` kept for verification; `--f0 yin` forces the fallback.
+- Remaining (small): float32 STFT vs torch FFT rounding → ~4% coarse-bin
+  flips at bin boundaries (audibly negligible; 0.19 Hz f0 diff).
 
 ## How to reproduce the verification
 
