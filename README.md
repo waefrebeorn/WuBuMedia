@@ -21,6 +21,12 @@ actual much greater technologies."*
 | `face/` | The cohost "face" overlay (browser source for OBS) — the rendered representation on stream |
 | `feed/` | `github_feed.py` — turns the agents' real GitHub commits into stream-ready blurbs |
 | `src/` | Small helper tools (OBS control, resource guard) the cohost runs |
+| `out/demo/` | Production demos — Cleveland Brown albums (clevelandisgolden, cleveGOLDhope) run through WuBuRVC character voices + the C11 mastering suite |
+
+> **The voice engine moved to its own repo: [`waefrebeorn/wuburvc`](https://github.com/waefrebeorn/wuburvc)** —
+> the from-scratch C11 RVC engine (inference + RMVPE pitch + mastering +
+> WordVoice TTS bridge), parity-verified vs PyTorch (corr 0.9999). This repo
+> keeps the stream/persona layer and the production demo pipeline.
 
 ## The persona in one breath
 
