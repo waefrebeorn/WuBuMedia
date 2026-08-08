@@ -29,6 +29,7 @@
 #include "wubu_rvc_hubert.h"
 #include "wubu_rvc_f0.h"
 #include "wubu_rmvpe.h"
+#include "wubu_audioio.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -103,7 +104,8 @@ static int write_wav(const char *path, const float *data, int n, int sr) {
     return 0;
 }
 
-/* linear resample to target sr */
+/* resample to target sr — windowed-sinc (Kaiser) so pitch extraction
+ * sees a clean spectrum (linear aliases → pitch noise across model kHz). */
 static float *resample(const float *in, int n_in, int sr_in, int sr_out, int *n_out) {
     if (sr_in == sr_out) {
         float *out = (float *)malloc((size_t)n_in * sizeof(float));
@@ -114,15 +116,8 @@ static float *resample(const float *in, int n_in, int sr_in, int sr_out, int *n_
     double ratio = (double)sr_out / sr_in;
     int n = (int)(n_in * ratio);
     float *out = (float *)malloc((size_t)n * sizeof(float));
-    if (!out) return NULL;
-    for (int i = 0; i < n; i++) {
-        double pos = i / ratio;
-        int i0 = (int)pos;
-        int i1 = i0 + 1 < n_in ? i0 + 1 : i0;
-        double frac = pos - i0;
-        out[i] = (float)(in[i0] * (1 - frac) + in[i1] * frac);
-    }
-    *n_out = n;
+    if (!out) { *n_out = 0; return NULL; }
+    *n_out = wubu_audio_resample_sinc(in, n_in, sr_in, sr_out, out);
     return out;
 }
 
@@ -178,6 +173,8 @@ int main(int argc, char **argv) {
     float f0_smooth = 0.0f;   /* 0.0 = no smoothing */
     char f0ref_dir[1024] = {0}; /* reference f0 dir (nsff0_raw.bin + f0_coarse.bin) */
     int force_yin = 0;        /* --f0 yin: force YIN instead of RMVPE */
+    int f0_filter_radius = 3; /* --f0filter N: median filter on f0 (0 = off) */
+    float rms_mix = 0.25f;    /* --rmsmix F: output follows input volume envelope (RVC default 0.25) */
     snprintf(model_path, sizeof(model_path), "%s/model.pth", model_dir);
     for (int a = 4; a < argc - 1; a++) {
         if (strcmp(argv[a], "--model") == 0) {
@@ -208,6 +205,15 @@ int main(int argc, char **argv) {
             a++;
         } else if (strcmp(argv[a], "--f0") == 0 && strcmp(argv[a + 1], "yin") == 0) {
             force_yin = 1;
+            a++;
+        } else if (strcmp(argv[a], "--f0filter") == 0) {
+            f0_filter_radius = atoi(argv[a + 1]);
+            if (f0_filter_radius < 0) f0_filter_radius = 0;
+            a++;
+        } else if (strcmp(argv[a], "--rmsmix") == 0) {
+            rms_mix = (float)atof(argv[a + 1]);
+            if (rms_mix < 0.0f) rms_mix = 0.0f;
+            if (rms_mix > 1.0f) rms_mix = 1.0f;
             a++;
         }
     }
@@ -364,6 +370,12 @@ int main(int argc, char **argv) {
             printf("[5] yin f0 frames: %d\n", n_f0);
         }
         if (rm) wubu_rmvpe_free(rm);
+        /* filter_radius median — kills octave jumps that make singing
+         * off-key while preserving vibrato (RVC default radius 3). */
+        if (f0_filter_radius > 0 && n_f0 > 0) {
+            wubu_f0_median_filter(f0, n_f0, f0_filter_radius);
+            printf("[5] f0 median filter radius %d applied\n", f0_filter_radius);
+        }
         f0_coarse = (int *)malloc((size_t)(n_f0 + 2) * sizeof(int));
         nsff0 = (float *)malloc((size_t)(n_f0 + 2) * sizeof(float));
         wubu_f0_to_coarse(f0, n_f0, 50.0f, 1100.0f, f0_coarse, nsff0);
@@ -482,6 +494,23 @@ int main(int argc, char **argv) {
          * Currently logged as informational — for production, hook into the
          * F0 extraction path before the synthesis step. */
         printf("     [f0smooth] strength=%.2f (note: applies to F0 before synth)\n", f0_smooth);
+    }
+
+    /* RMS envelope mix — output follows the input's volume dynamics */
+    if (rms_mix > 0.001f) {
+        int nin_out = 0;
+        float *input_at_out = resample(audio, n_in, sr_in, sr_out, &nin_out);
+        if (input_at_out) {
+            if (nin_out > n_out) nin_out = n_out;
+            float *in_pad = (float *)calloc((size_t)n_out, sizeof(float));
+            if (in_pad) {
+                memcpy(in_pad, input_at_out, (size_t)nin_out * sizeof(float));
+                wubu_rms_mix_rate(in_pad, out_audio, n_out, sr_out, rms_mix);
+                printf("     [rmsmix] envelope mix=%.2f applied\n", rms_mix);
+                free(in_pad);
+            }
+            free(input_at_out);
+        }
     }
 
     /* 6. write wav */

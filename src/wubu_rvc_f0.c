@@ -153,3 +153,32 @@ int wubu_f0_to_coarse(const float *f0, int n_frames,
     }
     return n_frames;
 }
+
+void wubu_f0_median_filter(float *f0, int n_frames, int radius) {
+    if (!f0 || n_frames <= 0 || radius < 1) return;
+    int r = radius / 2; /* window = 2r+1 */
+    int win = 2 * r + 1;
+    float *tmp = (float *)malloc((size_t)n_frames * sizeof(float));
+    if (!tmp) return;
+    /* sliding median of VOICED frames only; 0 (unvoiced) passes through */
+    for (int i = 0; i < n_frames; i++) {
+        float buf[64];
+        int cnt = 0;
+        for (int j = i - r; j <= i + r; j++) {
+            if (j < 0 || j >= n_frames) continue;
+            float v = f0[j];
+            if (v > 0.0f && cnt < 64) buf[cnt++] = v;
+        }
+        if (cnt == 0) { tmp[i] = f0[i]; continue; }
+        /* insertion sort the window */
+        for (int a = 1; a < cnt; a++) {
+            float key = buf[a];
+            int b = a - 1;
+            while (b >= 0 && buf[b] > key) { buf[b + 1] = buf[b]; b--; }
+            buf[b + 1] = key;
+        }
+        tmp[i] = buf[cnt / 2]; /* median of voiced neighbors */
+    }
+    memcpy(f0, tmp, (size_t)n_frames * sizeof(float));
+    free(tmp);
+}

@@ -59,6 +59,15 @@ void wubu_formant_shift(const float *input, float *output, int n, int sr,
  * Research: VibE-SVC (arXiv:2606.17126), Smart-Median smoothing. */
 void wubu_f0_smooth(float *f0, int n, float strength);
 
+/* ── RMS envelope mix (RVC "rms_mix_rate", default 0.25) ──
+ * Makes the converted output follow the INPUT volume envelope so dynamics
+ * survive conversion. envelope = input_env*mix + output_env*(1-mix), then
+ * output is rescaled by envelope/output_env. mix=0 → pure output envelope,
+ * mix=1 → exact input envelope. Frame RMS: window 2048, hop 512 at out_sr.
+ * in/out must be same length n at out_sr. In place on out. */
+void wubu_rms_mix_rate(const float *input, float *output, int n, int sr,
+                       float mix);
+
 /* ── Adaptive mixing (index rate) ──
  * Blends original (unconverted) features with converted features based on
  * energy threshold. High-energy voiced regions use more converted features;

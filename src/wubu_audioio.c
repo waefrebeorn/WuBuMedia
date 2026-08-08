@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 /* ── internal: parse one WAV into interleaved float32 (stereo) ──
  * Handles PCM 16/24/32-int, IEEE float, extensible. Returns channels (1/2)
@@ -224,4 +227,53 @@ void wubu_audio_mix_pan(const float *src, int n, float gain, float pan,
         l[i] += src[i] * gain * lg;
         r[i] += src[i] * gain * rg;
     }
+}
+
+/* ── windowed-sinc (Kaiser) resampler ── */
+#define WUBU_SINC_TAPS 64
+static double kaiser_bessel_i0(double x) {
+    double sum = 1.0, term = 1.0;
+    for (int k = 1; k < 32; k++) {
+        term *= (x * x) / (4.0 * k * k);
+        sum += term;
+        if (term < 1e-18) break;
+    }
+    return sum;
+}
+
+int wubu_audio_resample_sinc(const float *in, int n, int in_sr, int out_sr,
+                             float *out) {
+    if (!in || !out || n <= 0 || in_sr <= 0 || out_sr <= 0) return -1;
+    if (in_sr == out_sr) {
+        memcpy(out, in, (size_t)n * sizeof(float));
+        return n;
+    }
+    double ratio = (double)out_sr / (double)in_sr;
+    int n_out = (int)(n * ratio);
+    if (n_out < 1) n_out = 1;
+    const double beta = 14.8;
+    const double i0beta = kaiser_bessel_i0(beta);
+    const int M = WUBU_SINC_TAPS;
+    const double half = M / 2.0;
+    /* cutoff = min(1, 1/ratio) * 0.95 — anti-alias */
+    const double cutoff = (ratio < 1.0 ? ratio : 1.0) * 0.95;
+    for (int i = 0; i < n_out; i++) {
+        double pos = (double)i / ratio;   /* input-space position */
+        int center = (int)pos;
+        double frac = pos - center;
+        double acc = 0.0, wsum = 0.0;
+        for (int j = 0; j < M; j++) {
+            int idx = center - (int)half + j;
+            if (idx < 0 || idx >= n) continue;
+            double t = (double)(j - half + frac); /* distance from sinc center */
+            double x = M_PI * t * cutoff;
+            double sinc = (fabs(t) < 1e-9) ? cutoff : cutoff * sin(x) / x;
+            double win = kaiser_bessel_i0(beta * sqrt(1.0 - (t * t) / (half * half)))
+                         / i0beta;
+            acc += in[idx] * sinc * win;
+            wsum += sinc * win;
+        }
+        out[i] = (wsum > 1e-12) ? (float)(acc / wsum) : 0.0f;
+    }
+    return n_out;
 }

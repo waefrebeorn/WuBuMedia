@@ -306,3 +306,47 @@ void wubu_apply_character_preset(const float *input, float *output, int n, int s
     }
     wubu_post_process(input, output, n, sr, &opts);
 }
+
+void wubu_rms_mix_rate(const float *input, float *output, int n, int sr,
+                       float mix) {
+    if (!input || !output || n <= 0 || sr <= 0) return;
+    const int win = 2048, hop = 512;
+    if (n < win) {
+        /* too short for one frame — just scale to input RMS */
+        double si = 0, so = 0;
+        for (int i = 0; i < n; i++) { si += (double)input[i] * input[i]; so += (double)output[i] * output[i]; }
+        float ri = (float)sqrt(si / n), ro = (float)sqrt(so / n);
+        if (ro > 1e-9f) {
+            float g = (ri * mix + ro * (1.0f - mix)) / ro;
+            for (int i = 0; i < n; i++) output[i] *= g;
+        }
+        return;
+    }
+    int n_frames = (n - win) / hop + 1;
+    float *env_in = (float *)malloc((size_t)n_frames * sizeof(float));
+    float *env_out = (float *)malloc((size_t)n_frames * sizeof(float));
+    if (!env_in || !env_out) { free(env_in); free(env_out); return; }
+    for (int f = 0; f < n_frames; f++) {
+        double si = 0, so = 0;
+        for (int j = 0; j < win; j++) {
+            int idx = f * hop + j;
+            si += (double)input[idx] * input[idx];
+            so += (double)output[idx] * output[idx];
+        }
+        env_in[f] = (float)sqrt(si / win);
+        env_out[f] = (float)sqrt(so / win);
+    }
+    /* apply blended envelope, linear-interp between frames */
+    for (int i = 0; i < n; i++) {
+        double pos = (double)i / hop;
+        int f0 = (int)pos;
+        if (f0 >= n_frames - 1) f0 = n_frames - 2;
+        double frac = pos - f0;
+        float ei = (float)(env_in[f0] + (env_in[f0 + 1] - env_in[f0]) * frac);
+        float eo = (float)(env_out[f0] + (env_out[f0 + 1] - env_out[f0]) * frac);
+        float env = ei * mix + eo * (1.0f - mix);
+        if (eo > 1e-9f) output[i] *= env / eo;
+    }
+    free(env_in);
+    free(env_out);
+}

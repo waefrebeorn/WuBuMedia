@@ -38,6 +38,15 @@ int wubu_audio_write(const char *path, const float *data, int n, int sr, int ste
  * Returns n_out. */
 int wubu_audio_resample(const float *in, int n, int in_sr, int out_sr, float *out);
 
+/* Windowed-sinc (Kaiser) resampler — the PROPER way to change sample rate.
+ * Linear interpolation aliases high frequencies, which smears pitch
+ * (extraction noise, "different kHz → different pitch" across models).
+ * Uses a 64-tap Kaiser-windowed sinc (beta=14.8) evaluated per output
+ * sample; O(n*64), plenty fast offline and correct for 32k/40k/48k
+ * conversions. Returns n_out. */
+int wubu_audio_resample_sinc(const float *in, int n, int in_sr, int out_sr,
+                             float *out);
+
 /* Trim/copy a segment: out gets samples [start, start+n) (clamped).
  * Returns actual copied count. */
 int wubu_audio_slice(const float *in, int n, int start, int len, float *out);

@@ -34,8 +34,18 @@ int wubu_f0_yin(const float *pcm, int n_samples, int sr,
  * coarse_out: int n_frames; f0bak_out: float n_frames (Hz, may alias f0_in).
  * f0_min/f0_max: the RVC search range (50/1100). */
 int wubu_f0_to_coarse(const float *f0, int n_frames,
-                      float f0_min, float f0_max,
-                      int *coarse_out, float *f0bak_out);
+                     float f0_min, float f0_max,
+                     int *coarse_out, float *f0bak_out);
+
+/* Median filter on an F0 contour (RVC "filter_radius", default radius 3).
+ *
+ * Kills octave jumps / single-frame pitch spikes that make converted
+ * singing go off-key ("hoarse" sound), while radius 1-3 preserves vibrato
+ * (5-8 Hz modulation survives a ±1 frame median at 100 fps). Only voiced
+ * frames participate in the median — unvoiced (0) frames are left as
+ * unvoiced so voicing decisions are not corrupted. radius must be odd >= 1.
+ * Modifies f0 in place. */
+void wubu_f0_median_filter(float *f0, int n_frames, int radius);
 
 #ifdef __cplusplus
 }

@@ -203,19 +203,35 @@ int wubu_master_process(const WuBuMasterOpts *opts, float *lr, int n, int sr) {
     }
     stage_peak("width", lr, n);
 
-    /* ── 5. limiter (peak, release smoothing) ── */
+    /* ── 5. limiter (TRUE-PEAK, 4x inter-sample detection) ──
+     * Sample-level peaks miss inter-sample overshoot - the reconstructed
+     * analog waveform between samples can exceed the ceiling and clip on
+     * DAC/codec ("random clipping" with zero sample-level clips). Estimate
+     * the true peak via 4x linear interpolation between adjacent samples
+     * and drive the gain computer from that, fast attack, slow release. */
     {
         float ceiling = db2lin(opts->limiter.ceiling_db);
+        float att = coeff_ms(0.5f, (float)sr); /* ~0.5 ms attack */
         float rel = coeff_ms(opts->limiter.release_ms, (float)sr);
         float gain = 1.0f;
         for (int i = 0; i < n; i++) {
-            float xl = lr[i * 2], xr = lr[i * 2 + 1];
-            float pk = fabsf(xl) > fabsf(xr) ? fabsf(xl) : fabsf(xr);
-            float target = 1.0f;
-            if (pk * gain > ceiling) target = ceiling / pk;
-            gain += rel * (target - gain);
-            lr[i * 2] = xl * gain;
-            lr[i * 2 + 1] = xr * gain;
+            float xl0 = lr[i * 2], xr0 = lr[i * 2 + 1];
+            float xl1 = (i + 1 < n) ? lr[(i + 1) * 2] : xl0;
+            float xr1 = (i + 1 < n) ? lr[(i + 1) * 2 + 1] : xr0;
+            float tp = 0.0f;
+            for (int k = 0; k < 4; k++) {
+                float f = (float)k / 4.0f;
+                float sl = fabsf(xl0 + (xl1 - xl0) * f);
+                float sr = fabsf(xr0 + (xr1 - xr0) * f);
+                if (sl > tp) tp = sl;
+                if (sr > tp) tp = sr;
+            }
+            float target = (tp * gain > ceiling) ? ceiling / tp : 1.0f;
+            float gnew = (target < gain) ? gain + att * (target - gain)
+                                         : gain + rel * (target - gain);
+            gain = gnew;
+            lr[i * 2] = xl0 * gain;
+            lr[i * 2 + 1] = xr0 * gain;
         }
     }
     stage_peak("limiter", lr, n);
@@ -230,9 +246,17 @@ int wubu_master_process(const WuBuMasterOpts *opts, float *lr, int n, int sr) {
             float gain = target / rms;
             /* true-peak safety */
             float peak = 0.0f;
-            for (int i = 0; i < n * 2; i++) {
-                float a = fabsf(lr[i] * gain);
-                if (a > peak) peak = a;
+            for (int i = 0; i < n; i++) {
+                float xl0 = lr[i * 2] * gain, xr0 = lr[i * 2 + 1] * gain;
+                float xl1 = (i + 1 < n) ? lr[(i + 1) * 2] * gain : xl0;
+                float xr1 = (i + 1 < n) ? lr[(i + 1) * 2 + 1] * gain : xr0;
+                for (int k = 0; k < 4; k++) {
+                    float f = (float)k / 4.0f;
+                    float sl = fabsf(xl0 + (xl1 - xl0) * f);
+                    float sr = fabsf(xr0 + (xr1 - xr0) * f);
+                    if (sl > peak) peak = sl;
+                    if (sr > peak) peak = sr;
+                }
             }
             float max_gain = db2lin(opts->loud.true_peak_db) / (peak + 1e-12f);
             if (max_gain < gain) gain = max_gain;

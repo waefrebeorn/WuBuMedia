@@ -55,18 +55,15 @@ def main():
     start_s = float(sys.argv[3])
     len_s = float(sys.argv[4])
     os.makedirs(out_dir, exist_ok=True)
-    pairs = [
-        ('0 Lead Vocals', 'Lead'),
-        ('1 Backing Vocals', 'Backing'),
-        ('2 Drums', 'Drums'),
-        ('3 Bass', 'Bass'),
-        ('4 Guitar', 'Guitar'),
-        ('5 Keyboard', 'Keys'),
-        ('6 Percussion', 'Perc'),
-        ('7 Synth', 'Synth'),
-        ('8 Other', 'Other'),
-    ]
-    for stem, tag in pairs:
+    # auto-discover stems: any "%L.wav" file in the session audiofiles dir
+    stems = []
+    for fn in sorted(os.listdir(src_dir)):
+        if fn.endswith('%L.wav') or fn.endswith('%L.WAV'):
+            stems.append(fn[:-len('%L.wav')])
+    if not stems:
+        print(f'!! no stems found in {src_dir}')
+        return 1
+    for stem in stems:
         for side in ('L', 'R'):
             p = os.path.join(src_dir, f'{stem}%{side}.wav')
             fmt, ch, sr, bits, data = read_float_wav(p)
@@ -75,8 +72,10 @@ def main():
             n0 = int(start_s * sr)
             n1 = min(len(data), int((start_s + len_s) * sr))
             seg = data[n0:n1]
+            tag = stem.replace(' ', '_')[:40]
             write_pcm16(os.path.join(out_dir, f'{tag}_{side}.wav'), seg, sr)
             print(f'{tag}_{side}: {len(seg)/sr:.1f}s from {p}')
+    return 0
 
 if __name__ == '__main__':
     main()
