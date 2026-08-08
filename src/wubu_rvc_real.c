@@ -18,6 +18,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include <immintrin.h>
 
 /* Uniform random in [lo, hi) — used for NSF noise injection */
 static inline float wubu_rand_uniform(float lo, float hi) {
@@ -117,9 +118,23 @@ static void conv1d_c(const float *in, int in_ch, int n,
                                 j_hi2 = (n - off + stride - 1) / stride;
                         }
                         if (j_lo < jb) j_lo = jb;
-                        if (j_lo < j_hi2)
+                        if (j_lo < j_hi2) {
+#if defined(__AVX2__) && defined(__FMA__)
+                            if (stride == 1) {
+                                __m256 wv8 = _mm256_set1_ps(wt);
+                                int j = j_lo;
+                                const float *ir = irow + off;
+                                for (; j + 8 <= j_hi2; j += 8) {
+                                    __m256 iv = _mm256_loadu_ps(ir + j);
+                                    __m256 ov = _mm256_loadu_ps(orow + j);
+                                    _mm256_storeu_ps(orow + j, _mm256_fmadd_ps(iv, wv8, ov));
+                                }
+                                for (; j < j_hi2; j++) orow[j] += ir[j] * wt;
+                            } else
+#endif
                             for (int j = j_lo; j < j_hi2; j++)
                                 orow[j] += irow[j * stride + off] * wt;
+                        }
                     }
                 }
             }
@@ -198,11 +213,23 @@ static void linear_c(const float *in, int in_d, int n,
         float *orow = out + (size_t)o * n;
         for (int j = 0; j < n; j++) orow[j] = bias;
         /* i outer, j inner: in[i*n+j] sequential per row → cache-friendly,
-         * vectorizable. (Old j-outer/i-inner touched in_d rows per output.) */
+        * vectorizable. (Old j-outer/i-inner touched in_d rows per output.) */
         for (int i = 0; i < in_d; i++) {
-            float wt = wv[i];
-            const float *irow = in + (size_t)i * n;
-            for (int j = 0; j < n; j++) orow[j] += irow[j] * wt;
+        float wt = wv[i];
+        const float *irow = in + (size_t)i * n;
+        #if defined(__AVX2__) && defined(__FMA__)
+        if (n >= 8) {
+            __m256 wv8 = _mm256_set1_ps(wt);
+            int jj = 0;
+            for (; jj + 8 <= n; jj += 8) {
+                __m256 iv = _mm256_loadu_ps(irow + jj);
+                __m256 ov = _mm256_loadu_ps(orow + jj);
+                _mm256_storeu_ps(orow + jj, _mm256_fmadd_ps(iv, wv8, ov));
+            }
+            for (; jj < n; jj++) orow[jj] += irow[jj] * wt;
+        } else
+        #endif
+        for (int j = 0; j < n; j++) orow[j] += irow[j] * wt;
         }
     }
 }
