@@ -30,6 +30,8 @@
 #include "wubu_rvc_f0.h"
 #include "wubu_rmvpe.h"
 #include "wubu_audioio.h"
+#include "wubu_autokey.h"
+#include "wubu_pitch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -177,6 +179,8 @@ int main(int argc, char **argv) {
     int force_yin = 0;        /* --f0 yin: force YIN instead of RMVPE */
     int f0_filter_radius = 3; /* --f0filter N: median filter on f0 (0 = off) */
     float rms_mix = 0.25f;    /* --rmsmix F: output follows input volume envelope (RVC default 0.25) */
+    int autokey_probe = 0;    /* --autokey N: auto key adaptation (N = probe secs) */
+    float autokey_shift = 0.0f; /* chosen feed shift (semitones), applied + restored */
     snprintf(model_path, sizeof(model_path), "%s/model.pth", model_dir);
     for (int a = 4; a < argc - 1; a++) {
         if (strcmp(argv[a], "--model") == 0) {
@@ -216,6 +220,10 @@ int main(int argc, char **argv) {
             rms_mix = (float)atof(argv[a + 1]);
             if (rms_mix < 0.0f) rms_mix = 0.0f;
             if (rms_mix > 1.0f) rms_mix = 1.0f;
+            a++;
+        } else if (strcmp(argv[a], "--autokey") == 0) {
+            autokey_probe = atoi(argv[a + 1]);
+            if (autokey_probe < 0) autokey_probe = 0;
             a++;
         }
     }
@@ -384,6 +392,39 @@ int main(int argc, char **argv) {
         wubu_f0_to_coarse(f0, n_f0, 50.0f, 1100.0f, f0_coarse, nsff0);
         n_f0_2 = n_f0;
     }
+
+    /* 5b. auto key adaptation — feed the model an f0 in its conditioned
+     * range, then restore the output to the input's key (phase vocoder). */
+    if (autokey_probe > 0 && n_f0_2 > 0) {
+        float cached_mean = 0, cached_drift = 0;
+        float cached_shift = wubu_autokey_load(model_dir, &cached_mean, &cached_drift);
+        float in_mean = wubu_autokey_input_mean(nsff0, n_f0_2);
+        if (cached_shift != 0.0f && cached_mean > 0 &&
+            fabsf(12.0f * log2f(in_mean / cached_mean)) < 3.0f) {
+            autokey_shift = cached_shift;
+            printf("[5b] autokey cached shift %+.1f st (input mean %.0f Hz)\n",
+                   autokey_shift, in_mean);
+        } else {
+            WuBuRmvpe *rm2 = wubu_rmvpe_load("models/rvc/rmvpe_weights.bin");
+            if (rm2) {
+                float drift = 0;
+                autokey_shift = wubu_autokey_calibrate(
+                    rvc->model, &hb, rm2, pcm16, n16, nsff0, n_f0_2,
+                    content_dim, sr_out, ups_total, noise_scale, 0 /*snake*/,
+                    autokey_probe, &drift);
+                wubu_rmvpe_free(rm2);
+                if (fabsf(autokey_shift) > 0.01f || fabsf(drift) > 30.0f)
+                    wubu_autokey_save(model_dir, autokey_shift, in_mean, drift);
+            }
+        }
+        if (fabsf(autokey_shift) > 0.01f) {
+            float gain = powf(2.0f, autokey_shift / 12.0f);
+            for (int i = 0; i < n_f0_2; i++) nsff0[i] *= gain;
+            wubu_f0_to_coarse(nsff0, n_f0_2, 50.0f, 1100.0f, f0_coarse, nsff0);
+            printf("[5b] autokey: feeding f0 %+.1f st (will restore output)\n",
+                   autokey_shift);
+        }
+    }
     free(f0);
 
     /* 6. real synth */
@@ -513,6 +554,18 @@ int main(int argc, char **argv) {
                 free(in_pad);
             }
             free(input_at_out);
+        }
+    }
+
+    /* Auto-key restore: the model was fed a shifted f0; pitch-shift the
+     * output back so the voice lands in the input's key. */
+    if (fabsf(autokey_shift) > 0.01f) {
+        float *restored = (float *)malloc((size_t)n_out * sizeof(float));
+        if (restored) {
+            wubu_pitch_shift(out_audio, n_out, sr_out, -autokey_shift, restored);
+            memcpy(out_audio, restored, (size_t)n_out * sizeof(float));
+            printf("     [autokey] restored output by %+.1f st\n", -autokey_shift);
+            free(restored);
         }
     }
 
