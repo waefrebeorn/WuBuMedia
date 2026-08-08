@@ -49,7 +49,7 @@ def bar_chart(d, x0, y0, w, h, items, title, fmt="{:.1f}"):
 
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else "out/demo/charts.png"
-    W, H = 1600, 900
+    W, H = 1600, 1200
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
 
@@ -69,6 +69,17 @@ def main():
         "Pitch conditioning: coarse-bin agreement with training (higher = in key)",
         fmt="{:.1f}%")
 
+    # Panel 1b: output-vs-input pitch tracking (the proof)
+    d.rectangle([40, 445, 820, 700], fill=PANEL, outline=(50, 56, 68))
+    bar_chart(
+        d, 70, 465, 700, 200,
+        [("old Bart", 0.082, BAD, "+107c, 928 oct-jumps"),
+         ("new Bart", 0.998, ACCENT, "-2c median, 0 jumps"),
+         ("Cartman", 0.994, ACCENT, "-5c"),
+         ("Freddie", 0.997, ACCENT, "+3c")],
+        "Output pitch tracking vs input (1.0 = perfectly in key)",
+        fmt="{:.3f}")
+
     # Panel 2: parity vs PyTorch reference
     d.rectangle([860, 130, 1560, 430], fill=PANEL, outline=(50, 56, 68))
     bar_chart(
@@ -80,9 +91,9 @@ def main():
         fmt="{:.3f}")
 
     # Panel 3: model arch support
-    d.rectangle([40, 460, 820, 700], fill=PANEL, outline=(50, 56, 68))
+    d.rectangle([40, 715, 820, 955], fill=PANEL, outline=(50, 56, 68))
     bar_chart(
-        d, 70, 480, 700, 190,
+        d, 70, 735, 700, 190,
         [("hardcoded", 1, BAD, "Cartman only"),
          ("arch-agnostic", 5, ACCENT, "40k + 32k + 768dim"),
          ("catalog", 8766, ACCENT, "scraped models")],
@@ -99,9 +110,19 @@ def main():
         "Inference speed (realtime factor, C11 single-thread)",
         fmt="{:.2f}x")
 
+    # Panel 4b: auto-key / pitch engine
+    d.rectangle([860, 715, 1560, 955], fill=PANEL, outline=(50, 56, 68))
+    bar_chart(
+        d, 890, 735, 640, 190,
+        [("pitch shift", 1201, ACCENT, "phase vocoder, MAD 5c"),
+         ("autokey", 0.998, ACCENT, "probe+restore, in key"),
+         ("parity", 0.9999, ACCENT, "vs PyTorch")],
+        "Pitch engine (wubu_pitch + wubu_autokey)",
+        fmt="{:.3f}")
+
     # Footer: mastering targets
-    d.rectangle([40, 720, 1560, 860], fill=PANEL, outline=(50, 56, 68))
-    d.text((70, 740), "C11 Mastering Suite v1 — verified targets",
+    d.rectangle([40, 970, 1560, 1110], fill=PANEL, outline=(50, 56, 68))
+    d.text((70, 990), "C11 Mastering Suite v1 — verified targets",
            font=font(20, True), fill=TEXT)
     rows = [
         ("Loudness target", "-18 dBFS RMS (streaming ~-14 LUFS next)", ACCENT),
@@ -111,7 +132,7 @@ def main():
         ("Envelope", "rms_mix 0.25 — output follows input dynamics", ACCENT),
         ("Resampler", "windowed-sinc Kaiser (linear aliased -> pitch noise)", ACCENT),
     ]
-    y = 780
+    y = 1030
     for lab, val, col in rows:
         d.text((70, y), lab, font=font(15, True), fill=DIM)
         d.text((330, y), val, font=font(15), fill=col)

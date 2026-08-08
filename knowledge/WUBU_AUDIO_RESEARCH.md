@@ -182,3 +182,21 @@ retrieval, (7) LUFS metering. All are C11-doable and belong in the engine.
   two concurrent conversions contend (avoid running 2 at once).
 - HuBERT ~0.7x realtime; synth ~11x realtime (flow+generator, OpenMP'd).
   Next big win: batch GRU over frames (RMVPE) + conv1d tiling.
+
+## Pitch forensics + auto-key (2026-08-08)
+
+- Measured output-vs-input pitch tracking with the C RMVPE (tools/wubu_f0dump):
+  Cartman -5c median (corr 0.994), Freddie +3c (0.997) — in key.
+  OLD Bart (pre-fixes) +107c, 928/2098 octave flips, corr 0.082 — off key.
+- ROOT CAUSE of "Bart off key": the old conversion predated the f0 median
+  filter + sinc resampler (linear resampling aliased -> pitch noise ->
+  octave flips). With the fixes the SAME model now tracks: -2c median,
+  0 octave flips, corr 0.998. Verify before assuming a model is bad.
+- Auto-key (--autokey N): wubu_pitch (phase vocoder, duration-preserving
+  pitch shift; verified 440->878 Hz, median +1201c, MAD 5c) + wubu_autokey
+  (per-model calibration: probe -> measure drift + octave-flip rate ->
+  pick the feed shift -> cache model_dir/model_key.json). The CLI feeds a
+  shifted f0 then restores the output key. Safety net for models trained
+  on a narrow range (child voices singing low male vocals etc.).
+- Album pipeline: full 3:27 clevelandisgolden lead vocal converts with
+  --autokey; 18-stem mix through the C11 suite at -18 dBFS.
