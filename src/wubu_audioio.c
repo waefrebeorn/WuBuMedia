@@ -25,7 +25,8 @@ static int wav_parse(const unsigned char *d, long dlen,
             ch = d[pos + 10] | (d[pos + 11] << 8);
             sr = (int)((unsigned int)(d[pos + 12] | (d[pos + 13] << 8) |
                                       (d[pos + 14] << 16) | (d[pos + 15] << 24)));
-            bits = d[pos + 18] | (d[pos + 19] << 8);
+            /* fmt data layout: tag(8) ch(10) sr(12) br(16) align(20) bits(22) */
+            bits = d[pos + 22] | (d[pos + 23] << 8);
         } else if (memcmp(d + pos, "data", 4) == 0) {
             data_off = (int)(pos + 8);
             data_len = (int)sz;

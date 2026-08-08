@@ -23,7 +23,7 @@
 static void die(const char *m) { fprintf(stderr, "wubu_mixmaster: %s\n", m); exit(1); }
 
 int main(int argc, char **argv) {
-    if (argc < 5) {
+    if (argc < 4) {
         fprintf(stderr, "Usage: %s <out.wav> <sr> <stem:gain:pan> [...]\n", argv[0]);
         return 1;
     }

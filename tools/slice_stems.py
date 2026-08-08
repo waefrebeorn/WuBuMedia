@@ -20,7 +20,7 @@ def read_float_wav(path):
             fmt_tag = struct.unpack('<H', d[pos + 8:pos + 10])[0]
             ch = struct.unpack('<H', d[pos + 10:pos + 12])[0]
             sr = struct.unpack('<I', d[pos + 12:pos + 16])[0]
-            bits = struct.unpack('<H', d[pos + 18:pos + 20])[0] if sz >= 16 else 16
+            bits = struct.unpack('<H', d[pos + 22:pos + 24])[0] if sz >= 24 else 16
         elif cid == b'data':
             raw = d[pos + 8:pos + 8 + sz]
             if fmt_tag == 3 or (fmt_tag == 0xFFFE and bits == 32):
