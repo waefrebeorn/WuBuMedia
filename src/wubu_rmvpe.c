@@ -462,7 +462,7 @@ int wubu_rmvpe_f0(WuBuRmvpe *r, const float *pcm, int n_samples,
             memcpy(cat + (size_t)cout * H2 * W2, skip,
                    (size_t)cout * H2 * W2 * sizeof(float));
             free(d);
-            free(skip);
+            free((float *)skip);
 
             float *cur = cat;
             for (int B = 0; B < 4; B++) {
