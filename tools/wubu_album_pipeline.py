@@ -22,7 +22,7 @@ TOOLS = os.path.join(BASE, 'tools')
 sys.path.insert(0, TOOLS)
 from slice_stems import read_float_wav, write_pcm16
 
-RVC_EXE = os.path.join(BASE, 'build', 'wubu_rvc_f0fix.exe')
+RVC_EXE = os.path.join(BASE, 'build', 'wubu_rvc_fix.exe')
 MIXMASTER = os.path.join(BASE, 'build', 'wubu_mixmaster.exe')
 PY = os.path.join(BASE, '.venv_win', 'Scripts', 'python.exe')
 
@@ -62,7 +62,7 @@ def find_stems(proj_dir):
 
 def rvc_convert(in_wav, model_dir, model_pth, out_wav, jobs=4):
     cmd = [RVC_EXE, in_wav, model_dir, out_wav, '--model', model_pth,
-           '--noise', '0.33333', '--jobs', str(jobs)]
+           '--noise', '0.33333', '--jobs', str(jobs), '--autokey', '8']
     r = subprocess.run(cmd, capture_output=True, text=True)
     for line in r.stdout.splitlines():
         if '[6]' in line: print('   ', line.strip())
@@ -121,17 +121,24 @@ def main():
         stem_wavs[name] = (lp2, rp2)
         print(f'   {name}: {n/sr2:.1f}s')
 
-    # --- 4. mix + master ---
-    print('[5] mixing + mastering (wubu_mixmaster)...')
-    # lead is 1.0 center; instruments per track: drums/bass center, others L/R pan
+    # --- 4. mix + master (ARDOUR RECIPE — boss's chain) ---
+    # The reference masters come from Ardour sessions with the ACE Expander
+    # makeup +8.01 dB on the lead vocal (gain 2.512), ALL other stems at
+    # UNITY (1.0), stereo pairs panned L/R, master bus clean → loudness is
+    # achieved at export (-18 dBFS RMS extended-LTS, -1 dBTP). Drowning the
+    # singer (lead 1.0, stems 0.8) is what made earlier pipeline outputs
+    # muffled — never do that again.
+    print('[5] mixing + mastering (Ardour recipe: vocal +8.01 dB, stems unity, -18 dBFS)...')
+    VOCAL_GAIN = 2.512  # +8.01 dB — the session's ACE Expander makeup
     mix_args = [MIXMASTER, os.path.join(out, f'{tag}_mastered.wav'), str(sr)]
-    mix_args += [f'{conv}:1.0:0']
+    mix_args += [f'{conv}:{VOCAL_GAIN}:0']
+    # NOTE: extra lead takes (-2/-3) are ALTERNATE takes, not layers — the
+    # Ardour recipe uses ONE take per project ("route 'seth' = the take").
+    # Do NOT mix them raw (raw boss voice into an RVC track = wrong) and do
+    # NOT re-convert them (the session's master uses a single take).
     for name, (lp2, rp2) in stem_wavs.items():
-        low = name.lower()
-        if 'drum' in low or 'bass' in low or 'percussion' in low:
-            mix_args += [f'{lp2}:0.8:0', f'{rp2}:0.8:0']
-        else:
-            mix_args += [f'{lp2}:0.8:-1', f'{rp2}:0.8:1']
+        # unity gain, pan stereo pairs L/R (matches the Ardour session faders)
+        mix_args += [f'{lp2}:1.0:-1', f'{rp2}:1.0:1']
     r = subprocess.run(mix_args, capture_output=True, text=True)
     print(r.stdout[-1500:] if r.stdout else '')
     if r.returncode != 0:
