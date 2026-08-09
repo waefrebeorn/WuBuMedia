@@ -1,9 +1,11 @@
-
-# Voice model research/test data (storage, not code)
+# Voice model binaries (stored on D: drive)
+voice_models/downloaded/*/models/
+voice_models/catalog/
 voice_models/research/
 voice_models/tests/
 voice_models/downloaded/
-s
+
+# Large data files
 models/vm_full_index.json
 models/voice_catalog.json
 out/vm_models_ranked.json
@@ -52,6 +54,7 @@ outputs/*.wav
 outputs/*.npy
 outputs/*.mp4
 outputs/*.log
+outputs/*.txt
 outputs/rvc_ref/
 
 # Cohost runtime state
