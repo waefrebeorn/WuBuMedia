@@ -31,6 +31,7 @@
 #include "wubu_rmvpe.h"
 #include "wubu_audioio.h"
 #include "wubu_autokey.h"
+#include "wubu_math.h"
 #include "wubu_pitch.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <omp.h>
+#include <immintrin.h>
 #include "wubu_postproc.h"
 
 static void die(const char *msg) { fprintf(stderr, "wubu_rvc_cli: %s\n", msg); exit(1); }
@@ -159,6 +161,8 @@ typedef struct {
     WuBuRVCModel *model; int speaker_id; float noise_scale; int use_snake;
     int ups_total;
     int chunk_16k, extra_16k, hop_16k;
+    int use_cuda;
+    int use_vk;
     float **audio; int *pos; int *len; int *rc;
     volatile int next; int n_chunks; int threads;
 } ChunkCtx;
@@ -201,7 +205,21 @@ static void *chunk_worker(void *arg) {
         int max_a = nf * ctx->ups_total + ctx->ups_total;
         float *aout = (float *)malloc((size_t)max_a * sizeof(float));
         if (!aout) { free(cmaj); ctx->rc[c] = -1; continue; }
-        int n_out = wubu_rvc_synthesize_real(ctx->model, cmaj, nf, ctx->content_dim,
+        int n_out = 0;
+        if (ctx->use_vk)
+            n_out = wubu_rvc_synthesize_real_vk(ctx->model, cmaj, nf, ctx->content_dim,
+                                                ctx->f0_coarse + f0_start,
+                                                ctx->nsff0 + f0_start,
+                                                ctx->speaker_id, ctx->noise_scale,
+                                                aout, max_a, ctx->use_snake);
+        else if (ctx->use_cuda)
+            n_out = wubu_rvc_synthesize_real_cuda(ctx->model, cmaj, nf, ctx->content_dim,
+                                                  ctx->f0_coarse + f0_start,
+                                                  ctx->nsff0 + f0_start,
+                                                  ctx->speaker_id, ctx->noise_scale,
+                                                  aout, max_a, ctx->use_snake);
+        else
+            n_out = wubu_rvc_synthesize_real(ctx->model, cmaj, nf, ctx->content_dim,
                                              ctx->f0_coarse + f0_start,
                                              ctx->nsff0 + f0_start,
                                              ctx->speaker_id, ctx->noise_scale,
@@ -217,6 +235,14 @@ static void *chunk_worker(void *arg) {
 }
 
 int main(int argc, char **argv) {
+    /* Nested OMP: the MRF's 3 stacks run in parallel, each with its own conv
+     * threads (3 stacks x 4 conv threads = 12). */
+    omp_set_nested(1);
+    omp_set_max_active_levels(2);
+    omp_set_num_threads(12);
+    /* FTZ + DAZ: flush denormals (the RVC's tiny activations create them in
+     * the conv accumulation — denormal FP ops are ~100x slower on x86) */
+    _mm_setcsr(_mm_getcsr() | (1u << 15) | (1u << 6));
     setvbuf(stdout, NULL, _IONBF, 0); /* crash-safe stage logging */
     setvbuf(stderr, NULL, _IONBF, 0);
     if (argc < 4) {
@@ -231,7 +257,13 @@ int main(int argc, char **argv) {
                 "         --snake       : use Snake activation (BigVGAN: x + (1/a)sin^2(a*x))\n"
                 "         --formant R   : formant shift ratio (1.0=none, <1=male, >1=female)\n"
                 "         --f0smooth S  : F0 contour smoothing strength (0.0-1.0)\n"
-                "         --f0ref DIR   : use reference f0 (nsff0_raw.bin + f0_coarse.bin)\n",
+                "         --f0ref DIR   : use reference f0 (nsff0_raw.bin + f0_coarse.bin)\n"
+                "         --chunk F     : chunked inference window in seconds (default 3.0)\n"
+                "         --ctx F       : HuBERT context window in seconds (default 0.72; 0.40 = speed mode)\n"
+                "         --mode M      : 'quality' (default, byte-identical reference) or 'speed'\n"
+                "                        (real-time: ctx 0.4 + conv tile 2048, ~1 LSB diff)\n"
+                "         --xfade F     : crossfade overlap in seconds (default 0.10)\n"
+                "         --jobs N      : parallel chunk workers (default 4)\n",
                 argv[0]);
         return 1;
     }
@@ -254,8 +286,20 @@ int main(int argc, char **argv) {
     float rms_mix = 0.25f;    /* --rmsmix F: output follows input volume envelope (RVC default 0.25) */
     int autokey_probe = 0;    /* --autokey N: auto key adaptation (N = probe secs) */
     float chunk_secs = 3.0f;  /* --chunk F: chunked inference (3s default; 0 = whole-track) */
+    float ctx_secs = 0.72f;   /* --ctx F: HuBERT context window in seconds
+                               * (0.72 default = RVC reference quality,
+                               * BYTE-IDENTICAL output; 0.40 = speed mode,
+                               * arXiv 2505.22487 effective context ~400ms,
+                               * mel 0.9632 — opt-in only) */
+    float xfade_secs = 0.10f; /* --xfade F: crossfade overlap in seconds (0.10 default) */
+    int mode_speed = 0;       /* --mode speed: all optimizations for real-time
+                               * CPU use (ctx 0.4 + conv tile 2048). Default
+                               * (quality) keeps byte-identical reference
+                               * output for music/master rendering. */
     int jobs = 4;             /* --jobs N: parallel chunk workers (sweet spot measured) */
     int no_chunk = 0;         /* --no-chunk: force the whole-track path (parity) */
+    int use_cuda = 0;         /* --cuda: run the GeneratorNSF on the GPU (CUDA) */
+    int use_vk = 0;           /* --vk: run the GeneratorNSF via Vulkan (cross-vendor) */
     float autokey_shift = 0.0f; /* chosen feed shift (semitones), applied + restored */
     snprintf(model_path, sizeof(model_path), "%s/model.pth", model_dir);
     for (int a = 4; a < argc; a++) {
@@ -305,13 +349,37 @@ int main(int argc, char **argv) {
             chunk_secs = (float)atof(argv[a + 1]);
             if (chunk_secs < 0.5f) chunk_secs = 0.5f;
             a++;
+        } else if (strcmp(argv[a], "--ctx") == 0) {
+            ctx_secs = (float)atof(argv[a + 1]);
+            if (ctx_secs < 0.05f) ctx_secs = 0.05f;
+            if (ctx_secs > 2.0f) ctx_secs = 2.0f;
+            a++;
+        } else if (strcmp(argv[a], "--xfade") == 0) {
+            xfade_secs = (float)atof(argv[a + 1]);
+            if (xfade_secs < 0.01f) xfade_secs = 0.01f;
+            if (xfade_secs > 1.0f) xfade_secs = 1.0f;
+            a++;
         } else if (strcmp(argv[a], "--jobs") == 0) {
             jobs = atoi(argv[a + 1]);
             if (jobs < 1) jobs = 1;
             if (jobs > 8) jobs = 8;
             a++;
+        } else if (strcmp(argv[a], "--mode") == 0) {
+            if (strcmp(argv[a + 1], "speed") == 0) {
+                mode_speed = 1;
+            } else if (strcmp(argv[a + 1], "quality") == 0) {
+                mode_speed = 0;
+            } else {
+                fprintf(stderr, "--mode: expected 'quality' or 'speed'\n");
+                return 1;
+            }
+            a++;
         } else if (strcmp(argv[a], "--no-chunk") == 0) {
             no_chunk = 1;
+        } else if (strcmp(argv[a], "--cuda") == 0) {
+            use_cuda = 1;
+        } else if (strcmp(argv[a], "--vk") == 0) {
+            use_vk = 1;
         }
     }
     if (!strstr(model_path, ".pth")) {
@@ -319,6 +387,20 @@ int main(int argc, char **argv) {
         char pat[1024]; snprintf(pat, sizeof(pat), "%s/*.pth", model_dir);
         /* use the C loader's own dir scan via wubu_rvc_load_weights later;
          * here just try common names */
+    }
+    /* --mode speed: all real-time optimizations (ctx 0.4 + conv tile 2048).
+     * quality (default): byte-identical reference output for rendering. */
+    if (mode_speed) {
+        if (ctx_secs == 0.72f) ctx_secs = 0.40f;  /* don't override explicit --ctx */
+        wubu_set_conv_tile(2048);
+        wubu_set_fast_math(1);  /* folded-poly exp/tanh/sigmoid (~7e-6) */
+        printf("[0] mode: speed (ctx %.2f, conv tile %d, fast math) — real-time CPU\n",
+               ctx_secs, wubu_get_conv_tile());
+    } else {
+        wubu_set_conv_tile(8192);
+        wubu_set_fast_math(0);  /* libm — byte-identical reference output */
+        printf("[0] mode: quality (ctx %.2f, conv tile %d) — reference output\n",
+               ctx_secs, wubu_get_conv_tile());
     }
     int use_chunk = (chunk_secs > 0.5f && !no_chunk);
     clock_t t0 = 0;
@@ -473,6 +555,11 @@ int main(int argc, char **argv) {
             printf("[5] yin f0 frames: %d\n", n_f0);
         }
         if (rm) wubu_rmvpe_free(rm);
+        if (getenv("WUBU_DUMP_F0")) {
+            FILE *df = fopen("f0_ours.bin", "wb");
+            if (df) { fwrite(f0, sizeof(float), (size_t)n_f0, df); fclose(df); }
+            fprintf(stderr, "[f0dump] wrote f0_ours.bin (%d frames)\n", n_f0);
+        }
         /* filter_radius median — kills octave jumps that make singing
          * off-key while preserving vibrato (RVC default radius 3). */
         if (f0_filter_radius > 0 && n_f0 > 0) {
@@ -482,6 +569,13 @@ int main(int argc, char **argv) {
         f0_coarse = (int *)malloc((size_t)(n_f0 + 2) * sizeof(int));
         nsff0 = (float *)malloc((size_t)(n_f0 + 2) * sizeof(float));
         wubu_f0_to_coarse(f0, n_f0, 50.0f, 1100.0f, f0_coarse, nsff0);
+        if (getenv("WUBU_DUMP_F0")) {
+            FILE *dc = fopen("f0coarse_ours.bin", "wb");
+            if (dc) { fwrite(f0_coarse, sizeof(int), (size_t)n_f0, dc); fclose(dc); }
+            FILE *dn = fopen("nsff0_ours.bin", "wb");
+            if (dn) { fwrite(nsff0, sizeof(float), (size_t)n_f0, dn); fclose(dn); }
+            fprintf(stderr, "[f0dump] wrote f0coarse_ours.bin + nsff0_ours.bin (%d frames)\n", n_f0);
+        }
         n_f0_2 = n_f0;
     }
 
@@ -526,8 +620,8 @@ int main(int argc, char **argv) {
     if (use_chunk) {
         /* 6b. chunked + parallel synthesis (default) */
         const int chunk_16k = (int)(chunk_secs * 16000);
-        const int extra_16k = 11520;                 /* 0.72 s HuBERT context */
-        const int xfade_16k = (int)(0.10f * 16000);  /* 0.1 s crossfade */
+        const int extra_16k = (int)(ctx_secs * 16000);       /* HuBERT context */
+        const int xfade_16k = (int)(xfade_secs * 16000);     /* crossfade */
         const int hop_16k = chunk_16k - xfade_16k;
         if (hop_16k < 16000) die("--chunk too small");
         int n_chunks = 0;
@@ -547,6 +641,8 @@ int main(int argc, char **argv) {
         ctx.hb = &hb; ctx.rvc_ver = rvc_ver; ctx.content_dim = content_dim;
         ctx.model = rvc->model; ctx.speaker_id = speaker_id;
         ctx.noise_scale = noise_scale; ctx.use_snake = use_snake;
+        ctx.use_cuda = use_cuda;
+        ctx.use_vk = use_vk;
         ctx.ups_total = ups_total;
         ctx.chunk_16k = chunk_16k; ctx.extra_16k = extra_16k; ctx.hop_16k = hop_16k;
         ctx.audio = caudio; ctx.pos = cpos; ctx.len = clen; ctx.rc = crc;

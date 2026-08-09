@@ -34,6 +34,18 @@ extern "C" {
 int wubu_denorm_tensor(const RVCTensor *g, const RVCTensor *v,
                        float *out, int n_elements);
 
+/* Conv tile size: 8192 (default) = byte-identical reference output;
+ * 2048 = speed mode (~3% faster, ~1 LSB diff at tile boundaries — for
+ * real-time use, NOT for master rendering). */
+void wubu_set_conv_tile(int tile);
+int wubu_get_conv_tile(void);
+
+/* Fast-math switch: 0 (default) = libm expf/tanhf (byte-identical output);
+ * 1 = folded-poly/bit-trick approximations (~7e-6 accuracy) — speed mode.
+ * Defined in wubu_math.h (shared), set by the CLI in --mode speed. */
+void wubu_set_fast_math(int on);
+int wubu_get_fast_math(void);
+
 /* ── Real RVC synthesis (the whole acoustic model) ──
  * model: loaded WuBuRVCModel (tensor map must contain enc_p.*, flow.*,
  *        dec.*, emb_g.weight).
@@ -61,6 +73,15 @@ int wubu_rvc_synthesize_real_cuda(WuBuRVCModel *model,
                                   int sid, float randn_scale,
                                   float *out_audio, int max_samples,
                                   int use_snake);
+
+/* Vulkan generator variant (wubu_vk.c): flow on CPU, GeneratorNSF via
+ * Vulkan compute shaders (cross-vendor — NVIDIA/AMD/Intel). */
+int wubu_rvc_synthesize_real_vk(WuBuRVCModel *model,
+                                const float *content, int n_frames, int content_dim,
+                                const int *f0_coarse, const float *nsff0,
+                                int sid, float randn_scale,
+                                float *out_audio, int max_samples,
+                                int use_snake);
 
 /* CUDA GeneratorNSF (defined in wubu_rvc_cuda.cu). */
 int wubu_generator_nsf_cuda(WuBuRVCModel *model,

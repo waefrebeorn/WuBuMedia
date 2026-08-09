@@ -1,5 +1,6 @@
 # Voice model binaries (stored on D: drive)
 voice_models/downloaded/*/models/
+voice_models/catalog/
 
 # Large data files
 models/vm_full_index.json
@@ -21,6 +22,24 @@ build/*.o
 build/*.exe
 build/*.log
 build/*.dll
+build/patch_cuda*.py
+build/t_*.c
+build/t_*.c.stubs.c
+build/t_run.bat
+build/tmp/
+build/vk/
+build/*.cmd
+*.obj
+
+# Scratch / debug dumps at repo root
+f0_ours.bin
+f0coarse_ours.bin
+nsff0_ours.bin
+verify_*.npy
+tmp_test_zcr2.*
+tmp_msvc/
+test_*.exe
+test_*.obj
 
 # Python
 .venv/

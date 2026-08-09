@@ -13,12 +13,14 @@
 
 #define _USE_MATH_DEFINES
 #include "wubu_rvc_real.h"
+#include "wubu_math.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <time.h>
 #include <immintrin.h>
+#include <omp.h>
 
 /* Uniform random in [lo, hi) — used for NSF noise injection */
 static inline float wubu_rand_uniform(float lo, float hi) {
@@ -80,10 +82,23 @@ static float *denorm_cache(const WuBuRVCModel *m, const char *base,
  * oc → j → tap → ic order touched in_ch rows of 11KB+ each per output sample
  * (thousands of cache misses per position); for T=111k × 512ch that was the
  * dominant cost of the whole engine. */
-static void conv1d_c(const float *in, int in_ch, int n,
-                     const float *w, const float *b,
-                     int out_ch, int k, int stride, int pad, int dil,
-                     float *out) {
+/* Conv tile size — global so the CLI can switch quality/speed modes.
+ * 8192 (default) = byte-identical reference output; 2048 = speed mode
+ * (4 tiles/call for the MRF's n≈8192 convs, ~3% faster, ~1 LSB diff at
+ * tile boundaries — for real-time use, not for master rendering). */
+static int g_conv_tile = 8192;
+void wubu_set_conv_tile(int tile) {
+    if (tile >= 512 && tile <= 16384) g_conv_tile = tile;
+}
+int wubu_get_conv_tile(void) { return g_conv_tile; }
+
+/* Fast-math switch lives in wubu_math.c (shared with GRU/HuBERT/RMVPE):
+ * wubu_get_fast_math() — 0 = libm (byte-identical), 1 = folded-poly (speed). */
+
+void conv1d_c(const float *in, int in_ch, int n,
+              const float *w, const float *b,
+              int out_ch, int k, int stride, int pad, int dil,
+              float *out) {
     int n_out = (n + 2 * pad - dil * (k - 1) - 1) / stride + 1;
     if (n_out <= 0) return;
     memset(out, 0, (size_t)out_ch * n_out * sizeof(float));
@@ -94,9 +109,116 @@ static void conv1d_c(const float *in, int in_ch, int n,
          * tile the SEQUENCE: each thread loads its input tile once and
          * accumulates into ALL output channels. */
         const int TILE = 8192;
-#pragma omp parallel for schedule(dynamic, 4) if(n_out >= TILE)
+#pragma omp parallel for schedule(dynamic, 4) num_threads(omp_in_parallel() ? 4 : 12) if(n_out >= TILE)
         for (int jb = 0; jb < n_out; jb += TILE) {
             int j_hi = jb + TILE < n_out ? jb + TILE : n_out;
+#if defined(__AVX2__) && defined(__FMA__)
+            if (stride == 1 && in_ch >= 8 && k >= 1) {
+                /* REGISTER-ACCUMULATED AVX2, OC-BLOCKED (4 output channels
+                 * share each input load — input traffic ÷4, orow once per
+                 * block). The whole (ic,tap) accumulation happens INSIDE
+                 * each 32-sample block. */
+                    enum { OC_BLK = 4 };
+                    int j_in_lo = jb < pad ? pad : jb;
+                    int j_in_hi = n - (k - 1) * dil + pad;
+                    if (j_in_hi > j_hi) j_in_hi = j_hi;
+                    int jr_max = n - 32 - (k - 1) * dil + pad;
+                    if (jr_max > j_in_hi - 32) jr_max = j_in_hi - 32;
+                    for (int oc0 = 0; oc0 < out_ch; oc0 += OC_BLK) {
+                        int n_oc = OC_BLK;
+                        if (oc0 + n_oc > out_ch) n_oc = out_ch - oc0;
+                        float *orow0[OC_BLK];
+                        const float *wv0[OC_BLK];
+                        float bias0[OC_BLK];
+                        for (int oc = 0; oc < n_oc; oc++) {
+                            orow0[oc] = out + (size_t)(oc0 + oc) * n_out;
+                            wv0[oc] = w + (size_t)(oc0 + oc) * in_ch * k;
+                            bias0[oc] = b ? b[oc0 + oc] : 0.0f;
+                            for (int j = jb; j < j_hi; j++) orow0[oc][j] += bias0[oc];
+                        }
+                        /* left boundary: full (ic,tap) sum, bounds-checked */
+                        for (int j = jb; j < j_in_lo && j < j_hi; j++)
+                            for (int oc = 0; oc < n_oc; oc++) {
+                                const float *wv = wv0[oc];
+                                float acc = orow0[oc][j];
+                                for (int ick = 0; ick < in_ch; ick++) {
+                                    const float *ir2 = in + (size_t)ick * n;
+                                    const float *wv2 = wv + (size_t)ick * k;
+                                    for (int tap = 0; tap < k; tap++) {
+                                        int src = j + tap * dil - pad;
+                                        if (src >= 0 && src < n) acc += ir2[src] * wv2[tap];
+                                    }
+                                }
+                                orow0[oc][j] = acc;
+                            }
+                        /* interior: all taps valid; register-blocked, 4-oc shared input */
+                        int jr = j_in_lo;
+                        for (; jr <= jr_max; jr += 32) {
+                            __m256 a0[OC_BLK], a1[OC_BLK], a2[OC_BLK], a3[OC_BLK];
+                            for (int oc = 0; oc < n_oc; oc++) {
+                                a0[oc] = _mm256_loadu_ps(orow0[oc] + jr);
+                                a1[oc] = _mm256_loadu_ps(orow0[oc] + jr + 8);
+                                a2[oc] = _mm256_loadu_ps(orow0[oc] + jr + 16);
+                                a3[oc] = _mm256_loadu_ps(orow0[oc] + jr + 24);
+                            }
+                            for (int ick = 0; ick < in_ch; ick++) {
+                                const float *ir2 = in + (size_t)ick * n + jr - pad;
+                                for (int tap = 0; tap < k; tap++) {
+                                    __m256 iv0 = _mm256_loadu_ps(ir2 + tap * dil);
+                                    __m256 iv1 = _mm256_loadu_ps(ir2 + 8 + tap * dil);
+                                    __m256 iv2 = _mm256_loadu_ps(ir2 + 16 + tap * dil);
+                                    __m256 iv3 = _mm256_loadu_ps(ir2 + 24 + tap * dil);
+                                    for (int oc = 0; oc < n_oc; oc++) {
+                                        float wt = wv0[oc][(size_t)ick * k + tap];
+                                        __m256 wv8 = _mm256_set1_ps(wt);
+                                        a0[oc] = _mm256_fmadd_ps(iv0, wv8, a0[oc]);
+                                        a1[oc] = _mm256_fmadd_ps(iv1, wv8, a1[oc]);
+                                        a2[oc] = _mm256_fmadd_ps(iv2, wv8, a2[oc]);
+                                        a3[oc] = _mm256_fmadd_ps(iv3, wv8, a3[oc]);
+                                    }
+                                }
+                            }
+                            for (int oc = 0; oc < n_oc; oc++) {
+                                _mm256_storeu_ps(orow0[oc] + jr, a0[oc]);
+                                _mm256_storeu_ps(orow0[oc] + jr + 8, a1[oc]);
+                                _mm256_storeu_ps(orow0[oc] + jr + 16, a2[oc]);
+                                _mm256_storeu_ps(orow0[oc] + jr + 24, a3[oc]);
+                            }
+                        }
+                        /* 8-wide tail: per-oc */
+                        for (; jr + 8 <= j_in_hi && jr + 7 + (k - 1) * dil - pad < n; jr += 8)
+                            for (int oc = 0; oc < n_oc; oc++) {
+                                const float *wv = wv0[oc];
+                                __m256 a0 = _mm256_loadu_ps(orow0[oc] + jr);
+                                for (int ick = 0; ick < in_ch; ick++) {
+                                    const float *ir2 = in + (size_t)ick * n + jr - pad;
+                                    const float *wv2 = wv + (size_t)ick * k;
+                                    for (int tap = 0; tap < k; tap++) {
+                                        a0 = _mm256_fmadd_ps(_mm256_loadu_ps(ir2 + tap * dil),
+                                                             _mm256_set1_ps(wv2[tap]), a0);
+                                    }
+                                }
+                                _mm256_storeu_ps(orow0[oc] + jr, a0);
+                            }
+                        /* right boundary + tail (full sum, bounds-checked) */
+                        for (; jr < j_hi; jr++)
+                            for (int oc = 0; oc < n_oc; oc++) {
+                                const float *wv = wv0[oc];
+                                float acc = orow0[oc][jr];
+                                for (int ick = 0; ick < in_ch; ick++) {
+                                    const float *ir2 = in + (size_t)ick * n;
+                                    const float *wv2 = wv + (size_t)ick * k;
+                                    for (int tap = 0; tap < k; tap++) {
+                                        int src = jr + tap * dil - pad;
+                                        if (src >= 0 && src < n) acc += ir2[src] * wv2[tap];
+                                    }
+                                }
+                                orow0[oc][jr] = acc;
+                            }
+                    }
+                    continue; /* full (ic,tap) done — skip the per-tap loops */
+                }
+#endif
             for (int oc = 0; oc < out_ch; oc++) {
                 float *orow = out + (size_t)oc * n_out;
                 float bias = b ? b[oc] : 0.0f;
@@ -119,19 +241,7 @@ static void conv1d_c(const float *in, int in_ch, int n,
                         }
                         if (j_lo < jb) j_lo = jb;
                         if (j_lo < j_hi2) {
-#if defined(__AVX2__) && defined(__FMA__)
-                            if (stride == 1) {
-                                __m256 wv8 = _mm256_set1_ps(wt);
-                                int j = j_lo;
-                                const float *ir = irow + off;
-                                for (; j + 8 <= j_hi2; j += 8) {
-                                    __m256 iv = _mm256_loadu_ps(ir + j);
-                                    __m256 ov = _mm256_loadu_ps(orow + j);
-                                    _mm256_storeu_ps(orow + j, _mm256_fmadd_ps(iv, wv8, ov));
-                                }
-                                for (; j < j_hi2; j++) orow[j] += ir[j] * wt;
-                            } else
-#endif
+
                             for (int j = j_lo; j < j_hi2; j++)
                                 orow[j] += irow[j * stride + off] * wt;
                         }
@@ -168,7 +278,269 @@ static void conv1d_c(const float *in, int in_ch, int n,
     }
 }
 
-/* ConvTranspose1d, PyTorch weight (in_ch, out_ch, k). out: (n-1)*s - 2p + k */
+/* Conv1d with fused input activation + fused in-place residual add.
+ * Faithful specialization of conv1d_c (same accumulation order, bit-exact):
+ *   in_slope > 0  → apply lrelu(x, in_slope) to INPUT samples as loaded
+ *   resid != NULL → skip memset; at store, ADD the old out[] (the residual)
+ *                    to the accumulated result before writing back
+ * Used by the MRF: x' = conv2(lrelu(conv1(lrelu(x)))) + x collapses the old
+ * 7-pass sequence (2 memcpy + 2 lrelu + 1 add + 2 convs) into 2 fused calls
+ * with zero intermediate sweeps. Accumulation order per output element is
+ * identical to conv1d_c, so parity holds exactly.
+ * NOTE: resid==out is legal (in-place): out is only written at the final
+ * store, so reading out[j] there yields the untouched residual. */
+static void conv1d_c_fused_impl(const float *in, int in_ch, int n,
+                           const float *w, const float *b,
+                           int out_ch, int k, int stride, int pad, int dil,
+                           float *out, float in_slope, const float *resid) {
+    int n_out = (n + 2 * pad - dil * (k - 1) - 1) / stride + 1;
+    if (n_out <= 0) return;
+    if (!resid) memset(out, 0, (size_t)out_ch * n_out * sizeof(float));
+    if (out_ch >= 32) {
+        /* INPUT-STATIONARY tiled conv (same structure as conv1d_c). */
+        const int TILE = g_conv_tile;
+#pragma omp parallel for schedule(dynamic, 4) num_threads(omp_in_parallel() ? 4 : 12) if(n_out >= TILE)
+        for (int jb = 0; jb < n_out; jb += TILE) {
+            int j_hi = jb + TILE < n_out ? jb + TILE : n_out;
+#if defined(__AVX2__) && defined(__FMA__)
+            if (stride == 1 && in_ch >= 8 && k >= 1) {
+                /* REGISTER-ACCUMULATED AVX2, OC-BLOCKED (see conv1d_c). */
+                    enum { OC_BLK = 4 };
+                    int j_in_lo = jb < pad ? pad : jb;
+                    int j_in_hi = n - (k - 1) * dil + pad;
+                    if (j_in_hi > j_hi) j_in_hi = j_hi;
+                    int jr_max = n - 32 - (k - 1) * dil + pad;
+                    if (jr_max > j_in_hi - 32) jr_max = j_in_hi - 32;
+                    for (int oc0 = 0; oc0 < out_ch; oc0 += OC_BLK) {
+                        int n_oc = OC_BLK;
+                        if (oc0 + n_oc > out_ch) n_oc = out_ch - oc0;
+                        float *orow0[OC_BLK];
+                        const float *wv0[OC_BLK];
+                        float bias0[OC_BLK];
+                        for (int oc = 0; oc < n_oc; oc++) {
+                            orow0[oc] = out + (size_t)(oc0 + oc) * n_out;
+                            wv0[oc] = w + (size_t)(oc0 + oc) * in_ch * k;
+                            bias0[oc] = b ? b[oc0 + oc] : 0.0f;
+                            if (!resid)
+                                for (int j = jb; j < j_hi; j++) orow0[oc][j] += bias0[oc];
+                        }
+                        /* left boundary: full (ic,tap) sum, bounds-checked */
+                        for (int j = jb; j < j_in_lo && j < j_hi; j++)
+                            for (int oc = 0; oc < n_oc; oc++) {
+                                const float *wv = wv0[oc];
+                                float acc = resid ? bias0[oc] : orow0[oc][j];
+                                for (int ick = 0; ick < in_ch; ick++) {
+                                    const float *ir2 = in + (size_t)ick * n;
+                                    const float *wv2 = wv + (size_t)ick * k;
+                                    for (int tap = 0; tap < k; tap++) {
+                                        int src = j + tap * dil - pad;
+                                        if (src >= 0 && src < n) {
+                                            float iv = ir2[src];
+                                            if (in_slope > 0.0f && iv < 0.0f) iv *= in_slope;
+                                            acc += iv * wv2[tap];
+                                        }
+                                    }
+                                }
+                                if (resid) acc += orow0[oc][j];
+                                orow0[oc][j] = acc;
+                            }
+                        /* interior: all taps valid; register-blocked, 4-oc shared input */
+                        int jr = j_in_lo;
+                        for (; jr <= jr_max; jr += 32) {
+                            __m256 a0[OC_BLK], a1[OC_BLK], a2[OC_BLK], a3[OC_BLK];
+                            for (int oc = 0; oc < n_oc; oc++) {
+                                __m256 bb = _mm256_set1_ps(bias0[oc]);
+                                a0[oc] = bb;
+                                a1[oc] = bb;
+                                a2[oc] = bb;
+                                a3[oc] = bb;
+                            }
+                            for (int ick = 0; ick < in_ch; ick++) {
+                                const float *ir2 = in + (size_t)ick * n + jr - pad;
+                                for (int tap = 0; tap < k; tap++) {
+                                    __m256 iv0 = _mm256_loadu_ps(ir2 + tap * dil);
+                                    __m256 iv1 = _mm256_loadu_ps(ir2 + 8 + tap * dil);
+                                    __m256 iv2 = _mm256_loadu_ps(ir2 + 16 + tap * dil);
+                                    __m256 iv3 = _mm256_loadu_ps(ir2 + 24 + tap * dil);
+                                    if (in_slope > 0.0f) {
+                                        __m256 sl = _mm256_set1_ps(in_slope);
+                                        __m256 z = _mm256_setzero_ps();
+                                        iv0 = _mm256_blendv_ps(_mm256_mul_ps(iv0, sl), iv0,
+                                                               _mm256_cmp_ps(iv0, z, _CMP_GT_OQ));
+                                        iv1 = _mm256_blendv_ps(_mm256_mul_ps(iv1, sl), iv1,
+                                                               _mm256_cmp_ps(iv1, z, _CMP_GT_OQ));
+                                        iv2 = _mm256_blendv_ps(_mm256_mul_ps(iv2, sl), iv2,
+                                                               _mm256_cmp_ps(iv2, z, _CMP_GT_OQ));
+                                        iv3 = _mm256_blendv_ps(_mm256_mul_ps(iv3, sl), iv3,
+                                                               _mm256_cmp_ps(iv3, z, _CMP_GT_OQ));
+                                    }
+                                    for (int oc = 0; oc < n_oc; oc++) {
+                                        float wt = wv0[oc][(size_t)ick * k + tap];
+                                        __m256 wv8 = _mm256_set1_ps(wt);
+                                        a0[oc] = _mm256_fmadd_ps(iv0, wv8, a0[oc]);
+                                        a1[oc] = _mm256_fmadd_ps(iv1, wv8, a1[oc]);
+                                        a2[oc] = _mm256_fmadd_ps(iv2, wv8, a2[oc]);
+                                        a3[oc] = _mm256_fmadd_ps(iv3, wv8, a3[oc]);
+                                    }
+                                }
+                            }
+                            for (int oc = 0; oc < n_oc; oc++) {
+                                if (resid) {
+                                    a0[oc] = _mm256_add_ps(a0[oc], _mm256_loadu_ps(orow0[oc] + jr));
+                                    a1[oc] = _mm256_add_ps(a1[oc], _mm256_loadu_ps(orow0[oc] + jr + 8));
+                                    a2[oc] = _mm256_add_ps(a2[oc], _mm256_loadu_ps(orow0[oc] + jr + 16));
+                                    a3[oc] = _mm256_add_ps(a3[oc], _mm256_loadu_ps(orow0[oc] + jr + 24));
+                                }
+                                _mm256_storeu_ps(orow0[oc] + jr, a0[oc]);
+                                _mm256_storeu_ps(orow0[oc] + jr + 8, a1[oc]);
+                                _mm256_storeu_ps(orow0[oc] + jr + 16, a2[oc]);
+                                _mm256_storeu_ps(orow0[oc] + jr + 24, a3[oc]);
+                            }
+                        }
+                        /* 8-wide tail: per-oc */
+                        for (; jr + 8 <= j_in_hi && jr + 7 + (k - 1) * dil - pad < n; jr += 8)
+                            for (int oc = 0; oc < n_oc; oc++) {
+                                const float *wv = wv0[oc];
+                                __m256 a0 = _mm256_set1_ps(bias0[oc]);
+                                for (int ick = 0; ick < in_ch; ick++) {
+                                    const float *ir2 = in + (size_t)ick * n + jr - pad;
+                                    const float *wv2 = wv + (size_t)ick * k;
+                                    for (int tap = 0; tap < k; tap++) {
+                                        __m256 iv = _mm256_loadu_ps(ir2 + tap * dil);
+                                        if (in_slope > 0.0f) {
+                                            __m256 sl = _mm256_set1_ps(in_slope);
+                                            __m256 z = _mm256_setzero_ps();
+                                            iv = _mm256_blendv_ps(_mm256_mul_ps(iv, sl), iv,
+                                                                  _mm256_cmp_ps(iv, z, _CMP_GT_OQ));
+                                        }
+                                        a0 = _mm256_fmadd_ps(iv, _mm256_set1_ps(wv2[tap]), a0);
+                                    }
+                                }
+                                if (resid) a0 = _mm256_add_ps(a0, _mm256_loadu_ps(orow0[oc] + jr));
+                                _mm256_storeu_ps(orow0[oc] + jr, a0);
+                            }
+                        /* right boundary + tail (full sum, bounds-checked) */
+                        for (; jr < j_hi; jr++)
+                            for (int oc = 0; oc < n_oc; oc++) {
+                                const float *wv = wv0[oc];
+                                float acc = resid ? bias0[oc] : orow0[oc][jr];
+                                for (int ick = 0; ick < in_ch; ick++) {
+                                    const float *ir2 = in + (size_t)ick * n;
+                                    const float *wv2 = wv + (size_t)ick * k;
+                                    for (int tap = 0; tap < k; tap++) {
+                                        int src = jr + tap * dil - pad;
+                                        if (src >= 0 && src < n) {
+                                            float iv = ir2[src];
+                                            if (in_slope > 0.0f && iv < 0.0f) iv *= in_slope;
+                                            acc += iv * wv2[tap];
+                                        }
+                                    }
+                                }
+                                if (resid) acc += orow0[oc][jr];
+                                orow0[oc][jr] = acc;
+                            }
+                    }
+                    continue; /* full (ic,tap) done — skip the per-tap loops */
+                }
+#endif
+            for (int oc = 0; oc < out_ch; oc++) {
+                float *orow = out + (size_t)oc * n_out;
+                float bias = b ? b[oc] : 0.0f;
+                const float *wv = w + (size_t)oc * in_ch * k;
+                if (!resid)
+                    for (int j = jb; j < j_hi; j++) orow[j] += bias;
+                if (resid) {
+                    /* (bias + sum) + old — same association as the AVX2 path */
+                    for (int j = jb; j < j_hi; j++) {
+                        float acc = bias;
+                        for (int ic = 0; ic < in_ch; ic++) {
+                            const float *irow = in + (size_t)ic * n;
+                            for (int tap = 0; tap < k; tap++) {
+                                int src = j * stride + tap * dil - pad;
+                                if (src >= 0 && src < n) {
+                                    float iv = irow[src];
+                                    if (in_slope > 0.0f && iv < 0.0f) iv *= in_slope;
+                                    acc += iv * wv[(size_t)ic * k + tap];
+                                }
+                            }
+                        }
+                        orow[j] = acc + orow[j];
+                    }
+                } else {
+                    for (int ic = 0; ic < in_ch; ic++) {
+                        const float *irow = in + (size_t)ic * n;
+                        for (int tap = 0; tap < k; tap++) {
+                            int off = tap * dil - pad;
+                            float wt = wv[(size_t)ic * k + tap];
+                            int j_lo = jb, j_hi2 = j_hi;
+                            if (stride == 1) {
+                                if (off < 0) j_lo = -off;
+                                if (n - off < j_hi2) j_hi2 = n - off;
+                            } else {
+                                if (off < 0) j_lo = (-off + stride - 1) / stride;
+                                if (n - off < 0) j_hi2 = 0;
+                                else if ((n - off + stride - 1) / stride < j_hi2)
+                                    j_hi2 = (n - off + stride - 1) / stride;
+                            }
+                            if (j_lo < jb) j_lo = jb;
+                            if (j_lo < j_hi2) {
+                                for (int j = j_lo; j < j_hi2; j++) {
+                                    float iv = irow[j * stride + off];
+                                    if (in_slope > 0.0f && iv < 0.0f) iv *= in_slope;
+                                    orow[j] += iv * wt;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        /* few output channels: parallelize over the SEQUENCE (see conv1d_c) */
+        for (int oc = 0; oc < out_ch; oc++) {
+            float *orow = out + (size_t)oc * n_out;
+            float bias = b ? b[oc] : 0.0f;
+            const float *wv = w ? w + (size_t)oc * in_ch * k : NULL;
+            if (!wv) {
+                for (int j = 0; j < n_out; j++) orow[j] = bias + (resid ? orow[j] : 0.0f);
+                continue;
+            }
+#pragma omp parallel for schedule(dynamic, 64) if(n_out >= 4096)
+            for (int j = 0; j < n_out; j++) {
+                float acc = bias;
+                for (int ic = 0; ic < in_ch; ic++) {
+                    const float *irow = in + (size_t)ic * n;
+                    const float *wrow = wv + (size_t)ic * k;
+                    for (int tap = 0; tap < k; tap++) {
+                        int src = j * stride + tap * dil - pad;
+                        if (src >= 0 && src < n) {
+                            float iv = irow[src];
+                            if (in_slope > 0.0f && iv < 0.0f) iv *= in_slope;
+                            acc += iv * wrow[tap];
+                        }
+                    }
+                }
+                orow[j] = acc + (resid ? orow[j] : 0.0f);
+            }
+        }
+    }
+}
+
+/* Public wrapper — the MRF + parity tests link against this. */
+void conv1d_c_fused(const float *in, int in_ch, int n,
+                    const float *w, const float *b,
+                    int out_ch, int k, int stride, int pad, int dil,
+                    float *out, float in_slope, const float *resid) {
+    conv1d_c_fused_impl(in, in_ch, n, w, b, out_ch, k, stride, pad, dil,
+                        out, in_slope, resid);
+}
+
+/* ConvTranspose1d, PyTorch weight (in_ch, out_ch, k). out: (n-1)*s - 2p + k
+ * POLYPHASE: per output phase p in [0, stride), only taps
+ * tap = (p+pad) % stride + m*stride contribute, and their input index
+ * src = m + (p+pad-tap)/stride advances by 1 per output — the input reads
+ * become contiguous (SIMD-friendly) instead of the old scattered
+ * i→tap writes. Same products, reordered accumulation. */
 static void conv_transpose1d_c(const float *in, int in_ch, int n,
                                const float *w, const float *b,
                                int out_ch, int k, int stride, int pad,
@@ -176,30 +548,26 @@ static void conv_transpose1d_c(const float *in, int in_ch, int n,
     int n_out = (n - 1) * stride - 2 * pad + k;
     if (n_out <= 0) return;
     memset(out, 0, (size_t)out_ch * n_out * sizeof(float));
-    /* oc → ic → i → tap: out row sequential, in row sequential per (oc,ic).
-     * (Old i → ic → oc → tap scattered writes across out_ch rows.) */
 #pragma omp parallel for schedule(static) if(out_ch >= 16 && n >= 512)
     for (int oc = 0; oc < out_ch; oc++) {
         float *orow = out + (size_t)oc * n_out;
+        float bias = b ? b[oc] : 0.0f;
+        for (int j = 0; j < n_out; j++) orow[j] += bias;
         for (int ic = 0; ic < in_ch; ic++) {
             const float *irow = in + (size_t)ic * n;
             if (!w) continue;
             const float *wk = w + ((size_t)ic * out_ch + (size_t)oc) * k;
-            for (int i = 0; i < n; i++) {
-                float inp = irow[i];
-                if (inp == 0.0f) continue;
-                int j0 = i * stride - pad;
-                for (int tap = 0; tap < k; tap++) {
-                    int j = j0 + tap;
-                    if (j >= 0 && j < n_out) orow[j] += inp * wk[tap];
+            for (int p = 0; p < stride; p++) {
+                int m_max = (n_out - 1 - p) / stride + 1;
+                for (int tap = (p + pad) % stride; tap < k; tap += stride) {
+                    int s0 = (p + pad - tap) / stride;   /* src = m + s0 */
+                    float wt = wk[tap];
+                    int m_lo = s0 < 0 ? -s0 : 0;
+                    int m_hi = n - s0 < m_max ? n - s0 : m_max;
+                    for (int m = m_lo; m < m_hi; m++)
+                        orow[p + (size_t)m * stride] += irow[m + s0] * wt;
                 }
             }
-        }
-    }
-    if (b) {
-        for (int oc = 0; oc < out_ch; oc++) {
-            float *orow = out + (size_t)oc * n_out;
-            for (int j = 0; j < n_out; j++) orow[j] += b[oc];
         }
     }
 }
@@ -247,7 +615,20 @@ static void embedding_c(const float *emb, int num, int dim,
 }
 
 static void lrelu_c(float *x, size_t n, float slope) {
+#if defined(__AVX2__)
+    __m256 s8 = _mm256_set1_ps(slope);
+    __m256 z = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8) {
+        __m256 v = _mm256_loadu_ps(x + i);
+        __m256 neg = _mm256_mul_ps(v, s8);
+        __m256 r = _mm256_blendv_ps(neg, v, _mm256_cmp_ps(v, z, _CMP_GT_OQ));
+        _mm256_storeu_ps(x + i, r);
+    }
+    for (; i < n; i++) x[i] = x[i] > 0 ? x[i] : slope * x[i];
+#else
     for (size_t i = 0; i < n; i++) x[i] = x[i] > 0 ? x[i] : slope * x[i];
+#endif
 }
 
 /* Snake activation (BigVGAN): f(x) = x + (1/a) * sin^2(a*x).
@@ -260,7 +641,8 @@ static void lrelu_c(float *x, size_t n, float slope) {
  * CLI falls back to LeakyReLU (parity-verified SNR 29.79 dB) with a warning.
  * Snake stays available for models actually TRAINED with it (BigVGAN). */
 static inline float snake_c(float x, float a) {
-    return x + (1.0f / a) * (sinf(a * x) * sinf(a * x));
+    float s = wubu_sinf_folded(a * x);
+    return x + (1.0f / a) * (s * s);
 }
 static void snake_lrelu_c(float *x, size_t n, float slope) {
     (void)slope;  /* BigVGAN Snake has no LReLU term */
@@ -272,7 +654,9 @@ static void snake_lrelu_c(float *x, size_t n, float slope) {
 /* GELU as used by Mangio-RVC lib/infer_pack/attentions.py FFN:
  * x * sigmoid(1.702 * x). This is a distinct tanh-family form — the
  * text encoder was trained with it, so match it EXACTLY. */
-static float sigmoid_c(float x) { return 1.0f / (1.0f + expf(-x)); }
+static float sigmoid_c(float x) {
+    return wubu_get_fast_math() ? wubu_fastsigmoid(x) : (1.0f / (1.0f + expf(-x)));
+}
 static float gelu_c(float x) { return x * sigmoid_c(1.702f * x); }
 
 /* LayerNorm over channels (gamma/beta per channel), [C, T] */
@@ -310,6 +694,7 @@ static void mha_forward_t(const MHA *mha, const float *x, const float *c,
     conv1d_c(x, C, T, mha->wq, mha->bq, C, 1, 1, 0, 1, q);
     conv1d_c(c, C, T, mha->wk, mha->bk, C, 1, 1, 0, 1, k);
     conv1d_c(c, C, T, mha->wv, mha->bv, C, 1, 1, 0, 1, v);
+    if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[mha] qkv done T=%d C=%d\n", T, C);
 
     /* scores[h][ti][tj] = sum_d q[h,d,ti]*k[h,d,tj] / sqrt(kch) */
 #pragma omp parallel for schedule(static)
@@ -326,6 +711,7 @@ static void mha_forward_t(const MHA *mha, const float *x, const float *c,
             }
         }
     }
+    if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[mha] scores done\n");
 
     /* relative position bias (emb_rel_k, window=10): scores_local[t][s].
      * PyTorch: rel_logits = matmul(q/sqrt(kch), emb_used), then
@@ -351,6 +737,7 @@ static void mha_forward_t(const MHA *mha, const float *x, const float *c,
             }
         }
     }
+    if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[mha] rel done\n");
 
     /* mask fill (-1e4) + softmax over tj */
 #pragma omp parallel for schedule(static)
@@ -365,19 +752,23 @@ static void mha_forward_t(const MHA *mha, const float *x, const float *c,
             }
             float sum = 0;
             for (int tj = 0; tj < T; tj++) {
-                float e = expf(srow[(size_t)ti * T + tj] - mx);
+                float e = wubu_fastexp(srow[(size_t)ti * T + tj] - mx);
                 srow[(size_t)ti * T + tj] = e;
                 sum += e;
             }
             for (int tj = 0; tj < T; tj++) srow[(size_t)ti * T + tj] /= (sum + 1e-12f);
         }
     }
+    if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[mha] softmax done\n");
 
     /* out[h,d,ti] = sum_tj p_attn[h,ti,tj] * v[h,d,tj]  (+ relative values) */
 #pragma omp parallel for schedule(static)
     for (int h = 0; h < H; h++) {
         const float *srow = scores + (size_t)h * T * T;
+        if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[mha] out h=%d start\n", h);
         for (int ti = 0; ti < T; ti++) {
+            if (getenv("WUBU_TIME_STAGES") && ti < 3)
+                fprintf(stderr, "[mha] out h=%d ti=%d\n", h, ti);
             for (int d = 0; d < kch; d++) {
                 float acc = 0;
                 for (int tj = 0; tj < T; tj++)
@@ -456,11 +847,14 @@ int wubu_enc_p_forward(WuBuRVCModel *model,
     if (!x || !xp || !tmp || !y) { free(x); free(xp); free(tmp); free(y); return -1; }
 
     linear_c(phone, content_dim, nF, emb_w->data, emb_b->data, hidden, x);
+    if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[enc] linear done\n");
     embedding_c(pitch_w->data, 256, hidden, pitch, nF, xp);
+    if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[enc] embedding done\n");
     for (int i = 0; i < hidden * nF; i++) {
         x[i] = (x[i] + xp[i]) * sqrtf((float)hidden);
     }
     lrelu_c(x, (size_t)hidden * nF, 0.1f);
+    if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[enc] emb+lrelu done\n");
 
     /* x_mask: all ones (full length) */
     if (x_mask_out)
@@ -531,6 +925,7 @@ int wubu_enc_p_forward(WuBuRVCModel *model,
          * (the residual buffer) — passing (y, tmp) would add the PRE-conv_o
          * attention to x, which scrambles every channel. */
         mha_forward_t(&mha, x, x, attn_mask, nF, q, k, v, scores, tmp, y);
+        if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[enc] L%d mha done\n", L);
 
         if (getenv("WUBU_RVC_DUMP")) {
             char fn[128];
@@ -756,7 +1151,7 @@ static void wn_forward(const WNBlock *wn, float *x, int T,
             for (int j = 0; j < T; j++) {
                 float a = x_in[(size_t)c * T + j] + (gl ? gl[(size_t)c * T + j] : 0.0f);
                 float b = x_in[(size_t)(H + c) * T + j] + (gl ? gl[(size_t)(H + c) * T + j] : 0.0f);
-                acts[(size_t)c * T + j] = tanhf(a) * sigmoid_c(b);
+                acts[(size_t)c * T + j] = (wubu_get_fast_math() ? wubu_fasttanh(a) : tanhf(a)) * sigmoid_c(b);
             }
         }
         /* rs = res_skip_layers[i](acts): Conv1d(H -> 2H (i<L-1) or H (last), k=1) */
@@ -878,6 +1273,9 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                        int inject_noise,
                        int use_snake)  /* BigVGAN Snake activation in MRF blocks */
 {
+    const int profiling = getenv("WUBU_TIME_STAGES") != NULL;
+    double t_convT = 0.0, t_mrf = 0.0, t_noise = 0.0, t_other = 0.0;
+    double t0_all = profiling ? omp_get_wtime() : 0.0;
     int nF = n_frames;
     if (getenv("WUBU_RVC_DUMP")) {
         /* training-pair hook: real generator input (flow output z, (192,T)) */
@@ -1019,7 +1417,7 @@ int wubu_generator_nsf(WuBuRVCModel *model,
             int u = j % ups_total;   /* sample index within frame: 0..upp-1 */
             float phase = rad[fi] * (float)(u + 1);  /* f0/sr * (u+1) */
             if (fi > 0) phase += rad_acc[fi - 1];     /* add carry from prev frame */
-            float s = sinf(2.0f * (float)M_PI * phase) * 0.1f;  /* sine_amp = 0.1 */
+            float s = wubu_sinf_folded(2.0f * (float)M_PI * phase) * 0.1f;  /* sine_amp = 0.1 */
             float sv = (nsff0[fi] > 0) ? 1.0f : 0.0f;  /* uv mask */
             /* Phase 4 improvement: noise injection in NSF sine generation.
              * PyTorch SineGen injects uniform noise in unvoiced regions:
@@ -1029,7 +1427,7 @@ int wubu_generator_nsf(WuBuRVCModel *model,
             float noise_amp = inject_noise ? (1.0f - sv) * 0.1f / 3.0f : 0.0f;
             float noise = noise_amp * wubu_rand_uniform(-1.0f, 1.0f);
             float sw = s * sv + noise;                     /* sine * uv + noise * (1-uv) */
-            sine[j] = tanhf(linw * sw + linb);             /* l_linear + tanh */
+            sine[j] = wubu_fasttanh(linw * sw + linb);             /* l_linear + tanh */
         }
         free(carry); free(rad_acc); free(rad);
     }
@@ -1054,6 +1452,7 @@ int wubu_generator_nsf(WuBuRVCModel *model,
 
         /* ups[L]: ConvTranspose1d(ups_in -> ups_out, k, rate, pad) weight_norm.
          * wubu_rvc_weights.c already pre-computes hifi_upsample_denorm[L]. */
+        double t_ct0 = profiling ? omp_get_wtime() : 0.0;
         char key[256];
         snprintf(key, sizeof(key), "dec.ups.%d.bias", L);
         const RVCTensor *ub = T(model, key);
@@ -1077,6 +1476,7 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                                ub && ub->data ? ub->data : NULL,
                                ups_out[L], ups_k[L], ups_rate[L], ups_pad[L], stage[L]);
         }
+        if (profiling) t_convT += omp_get_wtime() - t_ct0;
 
         if (L == 0 && getenv("WUBU_DUMP_CPU")) {
             fprintf(stderr, "CPUUP0");
@@ -1131,6 +1531,7 @@ int wubu_generator_nsf(WuBuRVCModel *model,
          * inner convs). */
         {
             int ch = ups_out[L];
+            double t_m0 = profiling ? omp_get_wtime() : 0.0;
             int n_stacks = model->n_mrf_stacks;
             if (n_stacks < 1) n_stacks = 3; /* legacy no-config fallback */
             if (n_stacks > 8) n_stacks = 8;
@@ -1139,16 +1540,27 @@ int wubu_generator_nsf(WuBuRVCModel *model,
             if (n_pairs > 8) n_pairs = 8;
             /* per-stack accumulators — no shared writes. */
             float *acc = (float *)calloc((size_t)n_stacks * ch * next_n, sizeof(float));
-            if (acc) {
+            /* 64-byte aligned pooled slabs: the arena is touched 216×/chunk,
+             * split cache lines cost on every slab access (measured on Zen2:
+             * alignment + NT stores for write-once tensors). */
+#define WUBU_ALIGN64 64
+            float *pool_in  = (float *)_mm_malloc((size_t)n_stacks * ch * next_n * sizeof(float), WUBU_ALIGN64);
+            float *pool_out = (float *)_mm_malloc((size_t)n_stacks * ch * next_n * sizeof(float), WUBU_ALIGN64);
+            float *pool_tmp = (float *)_mm_malloc((size_t)n_stacks * ch * next_n * sizeof(float), WUBU_ALIGN64);
+            if (acc && pool_in && pool_out && pool_tmp) {
+                /* the 3 stacks are INDEPENDENT (same stage input, different
+                 * weights) — run them in parallel. Nested OMP (set in main):
+                 * each stack thread gets its own conv parallelism via the
+                 * conv1d_c num_threads(omp_in_parallel() ? 4 : 12). */
+#pragma omp parallel for schedule(static) num_threads(n_stacks) if(n_stacks >= 2)
                 for (int s = 0; s < n_stacks; s++) {
                     char key[256];
                     float *acc_s = acc + (size_t)s * ch * next_n;
                     int rb = L * n_stacks + s;
                     int k = model->resblock_k[s];
                     if (k <= 0) k = (s == 0) ? 3 : (s == 1 ? 7 : 11); /* legacy */
-                    float *rb_in = (float *)malloc((size_t)ch * next_n * sizeof(float));
-                    float *rb_out = (float *)malloc((size_t)ch * next_n * sizeof(float));
-                    if (!rb_in || !rb_out) { free(rb_in); free(rb_out); continue; }
+                    float *rb_in = pool_in + (size_t)s * ch * next_n;
+                    float *rb_out = pool_out + (size_t)s * ch * next_n;
                     memcpy(rb_in, stage[L], (size_t)ch * next_n * sizeof(float));
                     for (int cp = 0; cp < n_pairs; cp++) {
                         snprintf(key, sizeof(key), "dec.resblocks.%d.convs1.%d.weight_v", rb, cp);
@@ -1168,37 +1580,79 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                          * weight_v in place — data is the final weight. */
                         const float *d1 = r1v->data;
                         const float *d2 = r2v->data;
-                        float *tmp = (float *)malloc((size_t)ch * next_n * sizeof(float));
-                        if (tmp) {
-                            /* x = leaky(x); conv1; leaky; conv2; + residual */
-                            memcpy(tmp, rb_in, (size_t)ch * next_n * sizeof(float));
-                            if (use_snake) snake_lrelu_c(tmp, (size_t)ch * next_n, 0.1f);
-                            else lrelu_c(tmp, (size_t)ch * next_n, 0.1f);
-                            conv1d_c(tmp, ch, next_n, d1, r1b && r1b->data ? r1b->data : NULL,
-                                     ch, k, 1, pad1, dil, rb_out);
-                            if (use_snake) snake_lrelu_c(rb_out, (size_t)ch * next_n, 0.1f);
-                            else lrelu_c(rb_out, (size_t)ch * next_n, 0.1f);
-                            conv1d_c(rb_out, ch, next_n, d2, r2b && r2b->data ? r2b->data : NULL,
-                                     ch, k, 1, pad2, 1, tmp);
-                            for (int i = 0; i < ch * next_n; i++) tmp[i] += rb_in[i];
-                            memcpy(rb_in, tmp, (size_t)ch * next_n * sizeof(float));
+                        float *tmp = pool_tmp + (size_t)s * ch * next_n;
+                        {
+                            if (use_snake) {
+                                /* Snake can't fuse into the conv input load —
+                                 * keep the original 7-pass sequence. */
+                                memcpy(tmp, rb_in, (size_t)ch * next_n * sizeof(float));
+                                snake_lrelu_c(tmp, (size_t)ch * next_n, 0.1f);
+                                conv1d_c(tmp, ch, next_n, d1, r1b && r1b->data ? r1b->data : NULL,
+                                         ch, k, 1, pad1, dil, rb_out);
+                                snake_lrelu_c(rb_out, (size_t)ch * next_n, 0.1f);
+                                conv1d_c(rb_out, ch, next_n, d2, r2b && r2b->data ? r2b->data : NULL,
+                                         ch, k, 1, pad2, 1, tmp);
+                                for (int i = 0; i < ch * next_n; i++) tmp[i] += rb_in[i];
+                                memcpy(rb_in, tmp, (size_t)ch * next_n * sizeof(float));
+                            } else {
+                                /* x = conv2(lrelu(conv1(lrelu(x)))) + x fused into
+                                 * TWO conv calls: lrelu on the input load, residual
+                                 * added in-place at store. Zero intermediate
+                                 * sweeps (was: 2 memcpy + 2 lrelu + 1 add). */
+                                conv1d_c_fused(rb_in, ch, next_n,
+                                               d1, r1b && r1b->data ? r1b->data : NULL,
+                                               ch, k, 1, pad1, dil, rb_out, 0.1f, NULL);
+                                conv1d_c_fused(rb_out, ch, next_n,
+                                               d2, r2b && r2b->data ? r2b->data : NULL,
+                                               ch, k, 1, pad2, 1, rb_in, 0.1f, rb_in);
+                            }
                         }
-                        free(tmp);
                     }
+#if defined(__AVX2__)
+                    {
+                        size_t vi = 0, vn = (size_t)ch * next_n;
+                        for (; vi + 8 <= vn; vi += 8) {
+                            __m256 a = _mm256_loadu_ps(acc_s + vi);
+                            __m256 b = _mm256_loadu_ps(rb_in + vi);
+                            _mm256_storeu_ps(acc_s + vi, _mm256_add_ps(a, b));
+                        }
+                        for (; vi < vn; vi++) acc_s[vi] += rb_in[vi];
+                    }
+#else
                     for (int i = 0; i < ch * next_n; i++) acc_s[i] += rb_in[i];
+#endif
                     if (L == 0 && s == 0 && getenv("WUBU_DUMP_CPU")) {
                         fprintf(stderr, "CPUACCB");
                         for (int q = 0; q < 8; q++) fprintf(stderr, " %.3f", acc_s[q]);
                         fprintf(stderr, "\n");
                     }
-                    free(rb_in); free(rb_out);
                 }
+#if defined(__AVX2__)
+                if (n_stacks <= 8) {
+                    size_t vi = 0, vn = (size_t)ch * next_n;
+                    for (; vi + 8 <= vn; vi += 8) {
+                        __m256 s8 = _mm256_setzero_ps();
+                        for (int st = 0; st < n_stacks; st++)
+                            s8 = _mm256_add_ps(s8, _mm256_loadu_ps(acc + (size_t)st * ch * next_n + vi));
+                        __m256 inv = _mm256_set1_ps(1.0f / (float)n_stacks);
+                        _mm256_storeu_ps(stage[L] + vi, _mm256_mul_ps(s8, inv));
+                    }
+                    for (; vi < vn; vi++) {
+                        float s = 0.0f;
+                        for (int st = 0; st < n_stacks; st++)
+                            s += acc[(size_t)st * ch * next_n + vi];
+                        stage[L][vi] = s / (float)n_stacks;
+                    }
+                } else
+#endif
                 for (int i = 0; i < ch * next_n; i++) {
                     float s = 0.0f;
                     for (int st = 0; st < n_stacks; st++)
                         s += acc[(size_t)st * ch * next_n + i];
                     stage[L][i] = s / (float)n_stacks;
                 }
+                _mm_free(pool_in); _mm_free(pool_out); _mm_free(pool_tmp);
+                if (profiling) t_mrf += omp_get_wtime() - t_m0;
                 if (L == 0 && getenv("WUBU_DUMP_CPU")) {
                     fprintf(stderr, "CPUM0B");
                     for (int q = 0; q < 8; q++) fprintf(stderr, " %.3f", stage[0][q]);
@@ -1236,7 +1690,7 @@ int wubu_generator_nsf(WuBuRVCModel *model,
                         acc += cur[(size_t)c * cur_n + src] * kw[tap];
                 }
             }
-            out[j] = tanhf(acc); /* final activation */
+            out[j] = tanhf(acc); /* final activation — keep libm: this op's error goes straight to the output waveform */
         }
     }
     /* Snake saturation detection (replaces the old 0.15/max_out gain hack,
@@ -1264,6 +1718,12 @@ int wubu_generator_nsf(WuBuRVCModel *model,
     }
 
     free(stage[3]); free(sine);
+    if (profiling) {
+        fprintf(stderr, "[gen-time] convT=%.2fs mrf=%.2fs total=%.2fs (convT %.0f%% mrf %.0f%%)\n",
+                t_convT, t_mrf, omp_get_wtime() - t0_all,
+                100.0 * t_convT / (omp_get_wtime() - t0_all + 1e-9),
+                100.0 * t_mrf / (omp_get_wtime() - t0_all + 1e-9));
+    }
     if (getenv("WUBU_RVC_DUMP")) {
         FILE *df = fopen("outputs/rvc_ref/c_gen_output.npy", "wb");
         if (df) {
@@ -1311,6 +1771,7 @@ int wubu_rvc_synthesize_real(WuBuRVCModel *model,
                            f0_coarse, m, logs, x_mask) != 0) {
         free(m); free(logs); free(x_mask); free(z_p); free(z); return -1;
     }
+    if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[synth] enc_p done\n");
 
     /* Debug: WUBU_RVC_DUMP=1 writes intermediates as raw float files */
     if (getenv("WUBU_RVC_DUMP")) {
@@ -1341,7 +1802,7 @@ int wubu_rvc_synthesize_real(WuBuRVCModel *model,
                 r *= randn_scale;
             }
             z_p[(size_t)c * n_frames + j] =
-                (m[(size_t)c * n_frames + j] + expf(logs[(size_t)c * n_frames + j]) * r) * x_mask[j];
+                (m[(size_t)c * n_frames + j] + (wubu_get_fast_math() ? wubu_fastexp(logs[(size_t)c * n_frames + j]) : expf(logs[(size_t)c * n_frames + j])) * r) * x_mask[j];
             /* Clamp z_p to [-3, 3] (3 sigma for N(0,1) with noise_scale ~0.5).
              * Prevents extreme values that saturate the tanh output. */
             if (z_p[(size_t)c * n_frames + j] > 3.0f) z_p[(size_t)c * n_frames + j] = 3.0f;
@@ -1352,6 +1813,7 @@ int wubu_rvc_synthesize_real(WuBuRVCModel *model,
     if (wubu_flow_reverse(model, z_p, n_frames, inter, g, x_mask, z) != 0) {
         free(m); free(logs); free(x_mask); free(z_p); free(z); return -1;
     }
+    if (getenv("WUBU_TIME_STAGES")) fprintf(stderr, "[synth] flow done\n");
 
     if (getenv("WUBU_RVC_DUMP")) {
         FILE *df = fopen("outputs/rvc_ref/c_inter_z_p.npy", "wb");
@@ -1415,7 +1877,7 @@ int wubu_rvc_synthesize_real_cuda(WuBuRVCModel *model,
                 r *= randn_scale;
             }
             z_p[(size_t)c * n_frames + j] =
-                (m[(size_t)c * n_frames + j] + expf(logs[(size_t)c * n_frames + j]) * r) * x_mask[j];
+                (m[(size_t)c * n_frames + j] + (wubu_get_fast_math() ? wubu_fastexp(logs[(size_t)c * n_frames + j]) : expf(logs[(size_t)c * n_frames + j])) * r) * x_mask[j];
             if (z_p[(size_t)c * n_frames + j] > 3.0f) z_p[(size_t)c * n_frames + j] = 3.0f;
             if (z_p[(size_t)c * n_frames + j] < -3.0f) z_p[(size_t)c * n_frames + j] = -3.0f;
         }
@@ -1426,6 +1888,78 @@ int wubu_rvc_synthesize_real_cuda(WuBuRVCModel *model,
     int n_out = wubu_generator_nsf_cuda(model, z, n_frames, inter, nsff0, g,
                                         out_audio, max_samples,
                                         randn_scale > 0.0f, use_snake);
+    free(m); free(logs); free(x_mask); free(z_p); free(z);
+    return n_out;
+}
+
+/* Vulkan synth: same flow, generator via Vulkan compute shaders.
+ * The shared context + mutex serialize the generator (the flow stays
+ * parallel across the chunk workers; the GPU part is fast). */
+#include "wubu_vk.h"
+#include <pthread.h>
+static WuBuVk *g_vk = NULL;
+static pthread_mutex_t g_vk_mu = PTHREAD_MUTEX_INITIALIZER;
+
+int wubu_rvc_synthesize_real_vk(WuBuRVCModel *model,
+                                const float *content, int n_frames, int content_dim,
+                                const int *f0_coarse, const float *nsff0,
+                                int sid, float randn_scale,
+                                float *out_audio, int max_samples,
+                                int use_snake) {
+    if (!model || !content || !out_audio || n_frames < 1) return -1;
+    const RVCTensor *emb_g = T(model, "emb_g.weight");
+    if (!emb_g) return -1;
+    int gin = emb_g->dims[1];
+    if (sid < 0) sid = 0;
+    if (sid >= emb_g->dims[0]) sid = 0;
+    float g[256];
+    for (int i = 0; i < gin && i < 256; i++) g[i] = emb_g->data[(size_t)sid * gin + i];
+    int inter = 192;
+    {
+        const RVCTensor *pw = T(model, "enc_p.proj.weight");
+        if (pw) inter = pw->dims[0] / 2;
+    }
+    float *m = (float *)malloc((size_t)inter * n_frames * sizeof(float));
+    float *logs = (float *)malloc((size_t)inter * n_frames * sizeof(float));
+    float *x_mask = (float *)malloc((size_t)n_frames * sizeof(float));
+    float *z_p = (float *)malloc((size_t)inter * n_frames * sizeof(float));
+    float *z = (float *)malloc((size_t)inter * n_frames * sizeof(float));
+    if (!m || !logs || !x_mask || !z_p || !z) {
+        free(m); free(logs); free(x_mask); free(z_p); free(z); return -1;
+    }
+    if (wubu_enc_p_forward(model, content, n_frames, content_dim,
+                           f0_coarse, m, logs, x_mask) != 0) {
+        free(m); free(logs); free(x_mask); free(z_p); free(z); return -1;
+    }
+    for (int c = 0; c < inter; c++) {
+        for (int j = 0; j < n_frames; j++) {
+            float r = 0.0f;
+            if (randn_scale > 0.0f) {
+                r = wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f) +
+                    wubu_rand_uniform(-1.0f, 1.0f) + wubu_rand_uniform(-1.0f, 1.0f);
+                r *= randn_scale;
+            }
+            z_p[(size_t)c * n_frames + j] =
+                (m[(size_t)c * n_frames + j] + (wubu_get_fast_math() ? wubu_fastexp(logs[(size_t)c * n_frames + j]) : expf(logs[(size_t)c * n_frames + j])) * r) * x_mask[j];
+            if (z_p[(size_t)c * n_frames + j] > 3.0f) z_p[(size_t)c * n_frames + j] = 3.0f;
+            if (z_p[(size_t)c * n_frames + j] < -3.0f) z_p[(size_t)c * n_frames + j] = -3.0f;
+        }
+    }
+    if (wubu_flow_reverse(model, z_p, n_frames, inter, g, x_mask, z) != 0) {
+        free(m); free(logs); free(x_mask); free(z_p); free(z); return -1;
+    }
+    pthread_mutex_lock(&g_vk_mu);
+    if (!g_vk) g_vk = wubu_vk_create();
+    int n_out = -1;
+    if (g_vk)
+        n_out = wubu_vk_generator_nsf(g_vk, model, z, n_frames, inter, nsff0, g,
+                                      out_audio, max_samples,
+                                      randn_scale > 0.0f, use_snake);
+    pthread_mutex_unlock(&g_vk_mu);
     free(m); free(logs); free(x_mask); free(z_p); free(z);
     return n_out;
 }
