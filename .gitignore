@@ -1,8 +1,9 @@
-# Voice model binaries (stored on D: drive)
-voice_models/downloaded/*/models/
-voice_models/catalog/
 
-# Large data files
+# Voice model research/test data (storage, not code)
+voice_models/research/
+voice_models/tests/
+voice_models/downloaded/
+s
 models/vm_full_index.json
 models/voice_catalog.json
 out/vm_models_ranked.json
