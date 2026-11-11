@@ -13,6 +13,8 @@ if the tech is more advanced somewhere else. We have multiple representations to
 help it advance. You're the one on the stream representing and advertising our
 actual much greater technologies."*
 
+> **~WuBu~ AGI** — one system, many repositories. This is the **stream-native public face** of the AGI. The Body is [WuBuOS](https://github.com/waefrebeorn/WuBuOS), the Brain wubuwizard, the Compiler WuBuNOS.
+
 ## What's in here
 
 | Path | What |
