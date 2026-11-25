@@ -23,6 +23,7 @@ actual much greater technologies."*
 | `face/` | The cohost "face" overlay (browser source for OBS) — the rendered representation on stream |
 | `feed/` | `github_feed.py` — turns the agents' real GitHub commits into stream-ready blurbs |
 | `src/` | Small helper tools (OBS control, resource guard) the cohost runs |
+| `companion/` | **The companion core, implemented**: C11 emotion state machine, empathy engine and mood→prosody mapper, plus the voice layer with its refusal rule and a page rendered from the live ledger |
 
 ## The persona in one breath
 
